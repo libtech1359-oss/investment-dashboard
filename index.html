@@ -6,15 +6,15 @@
   <title>投資管理ダッシュボード</title>
   <style>
     :root {
-      --bg:#0f1117; --surface:#1a1d2e; --surface2:#242740;
-      --border:#2e3250; --accent:#6c8aff; --accent2:#4ecca3;
-      --text:#e8eaf6; --sub:#8b92b8; --pos:#4ecca3; --neg:#ff6b8a;
+      --bg:#1e2538; --surface:#28304a; --surface2:#323c58;
+      --border:#404d6a; --accent:#7b8cff; --accent2:#3dd6a8;
+      --text:#cdd5f0; --sub:#8590b8; --pos:#3dd6a8; --neg:#ff6b8a;
     }
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Segoe UI','Hiragino Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:72px}
 
     /* ── App bar ── */
-    .app-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 18px;display:flex;align-items:center;position:sticky;top:0;z-index:100}
+    .app-bar{background:var(--surface);border-bottom:1px solid var(--border);box-shadow:0 1px 8px rgba(0,0,0,.2);padding:14px 18px;display:flex;align-items:center;position:sticky;top:0;z-index:100}
     .app-bar h1{font-size:16px;font-weight:700}
     .app-bar .status{margin-left:auto;font-size:11px;color:var(--sub);text-align:right}
 
@@ -23,7 +23,7 @@
     .tab.active{display:block}
 
     /* ── Bottom nav (7 tabs, scrollable) ── */
-    .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);display:flex;z-index:100;overflow-x:auto;scrollbar-width:none;padding-bottom:env(safe-area-inset-bottom)}
+    .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -1px 10px rgba(0,0,0,.2);display:flex;z-index:100;overflow-x:auto;scrollbar-width:none;padding-bottom:env(safe-area-inset-bottom)}
     .bottom-nav::-webkit-scrollbar{display:none}
     .nav-btn{flex:1 0 52px;display:flex;flex-direction:column;align-items:center;padding:7px 2px 9px;cursor:pointer;color:var(--sub);font-size:8px;font-weight:700;letter-spacing:0.3px;gap:3px;border:none;background:none;transition:color .15s;white-space:nowrap}
     .nav-btn .icon{font-size:19px;line-height:1}
@@ -31,7 +31,7 @@
     .nav-btn:hover{color:var(--text)}
 
     /* ── Cards ── */
-    .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:14px}
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 2px 12px rgba(0,0,0,.15)}
     .card-title{font-size:10px;color:var(--sub);font-weight:700;letter-spacing:.9px;text-transform:uppercase;margin-bottom:14px}
     .summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .summary-card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 12px}
@@ -54,7 +54,7 @@
     thead tr:last-child th{background:var(--surface2);color:var(--text);padding:7px 10px;text-align:right;font-weight:600;font-size:11px;white-space:nowrap;border-bottom:2px solid var(--border)}
     thead tr:last-child th:first-child,tbody td:first-child{text-align:left}
     tbody td{padding:10px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap}
-    tbody tr:nth-child(even){background:rgba(255,255,255,.02)}
+    tbody tr:nth-child(even){background:rgba(255,255,255,.03)}
     tbody tr:hover{background:var(--surface2)}
     th.col-name,td.col-name{position:sticky;left:0;background:var(--surface);z-index:1;font-weight:600;border-right:2px solid var(--border);min-width:140px}
     thead tr:first-child th.col-name,thead tr:last-child th.col-name{background:var(--surface2)}
@@ -251,21 +251,6 @@
   </style>
 </head>
 <body>
-<script>
-  (function() {
-    const PASS = '179647';
-    const ok = sessionStorage.getItem('auth');
-    if (!ok) {
-      const input = prompt('パスワードを入力してください');
-      if (input !== PASS) {
-        document.body.innerHTML = '';
-        location.reload();
-        return;
-      }
-      sessionStorage.setItem('auth', '1');
-    }
-  })();
-</script>
 
   <div class="app-bar">
     <h1>📊 投資ダッシュボード</h1>
@@ -327,14 +312,12 @@
             <th colspan="2">元本</th>
             <th colspan="2">含み益</th>
             <th colspan="3">口数・価格</th>
-            <th colspan="2">マイレージ</th>
           </tr>
           <tr>
             <th>現在評価額</th><th>構成比</th>
             <th class="group-border">元本</th><th>元本比</th>
             <th class="group-border">含み益</th><th>収益率</th>
             <th class="group-border">保有口数</th><th>最新基準価格</th><th>平均取得価格</th>
-            <th class="group-border">利率</th><th>年率</th>
           </tr>
         </thead>
         <tbody id="fund-list"></tbody>
@@ -389,14 +372,6 @@
 
   <!-- ⑤ RULES -->
   <div class="tab" id="tab-rules">
-    <!-- シートから読み込んだルール -->
-    <div class="card" id="sheet-rules-card">
-      <div class="card-title">📋 ルール状態（シート連携）</div>
-      <div class="rule-cards" id="sheet-rule-list">
-        <div style="text-align:center;color:var(--sub);padding:20px;font-size:12px">読み込み中...</div>
-      </div>
-    </div>
-
     <!-- 手動シミュレーション -->
     <div class="card">
       <div class="card-title">💴 手動シミュレーション</div>
@@ -464,6 +439,11 @@
 
   <!-- ⑥ ANALYTICS -->
   <div class="tab" id="tab-analytics">
+    <!-- 元本・利益 積み上げ面グラフ -->
+    <div class="card">
+      <div class="card-title">投資元本 ＆ 含み益の推移</div>
+      <div class="chart-box" style="height:260px"><canvas id="chart-history"></canvas></div>
+    </div>
     <!-- 資産配分 -->
     <div class="card">
       <div class="card-title">資産配分</div>
@@ -490,6 +470,11 @@
     <div class="card">
       <div class="card-title">月別投資・損益</div>
       <div class="chart-box"><canvas id="chart-month"></canvas></div>
+    </div>
+    <!-- 日次収支推移 -->
+    <div class="card">
+      <div class="card-title">日次収支推移（前日比）</div>
+      <div class="chart-box" style="height:220px"><canvas id="chart-daily"></canvas></div>
     </div>
   </div>
 
@@ -545,7 +530,68 @@
     <div class="mkt-note" id="mkt-note">取得中...</div>
   </div>
 
-  <!-- ── Bottom Nav (7 tabs) ── -->
+  <!-- ⑧ FORECAST -->
+  <div class="tab" id="tab-forecast">
+    <!-- 設定 -->
+    <div class="card">
+      <div class="card-title">📐 シミュレーション設定</div>
+      <div class="input-group">
+        <div class="input-row">
+          <span class="input-label">期待年率リターン</span>
+          <input type="number" class="cash-input" id="fc-return" value="7" min="0" max="50" step="0.5" style="width:100px" oninput="updateForecast()">
+          <span class="input-unit">%</span>
+        </div>
+        <div class="input-row">
+          <span class="input-label">月次追加投資額</span>
+          <input type="number" class="cash-input" id="fc-monthly" placeholder="100000" min="0" step="10000" oninput="updateForecast()">
+          <span class="input-unit">円</span>
+        </div>
+        <div class="input-row">
+          <span class="input-label">シミュレーション期間</span>
+          <select class="auto-select" id="fc-years" onchange="updateForecast()">
+            <option value="10">10年</option>
+            <option value="20" selected>20年</option>
+            <option value="30">30年</option>
+            <option value="40">40年</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- 現在の実績 -->
+    <div class="summary-grid" style="margin-bottom:14px">
+      <div class="summary-card">
+        <div class="label">現在の評価額</div>
+        <div class="value" id="fc-cur-value">—</div>
+      </div>
+      <div class="summary-card">
+        <div class="label">月平均投資額（実績）</div>
+        <div class="value" id="fc-actual-monthly">—</div>
+      </div>
+      <div class="summary-card">
+        <div class="label">推定年率リターン（実績）</div>
+        <div class="value" id="fc-actual-return">—</div>
+      </div>
+      <div class="summary-card">
+        <div class="label">投資開始からの期間</div>
+        <div class="value" id="fc-period">—</div>
+      </div>
+    </div>
+
+    <!-- グラフ -->
+    <div class="card">
+      <div class="card-title">📈 資産予測グラフ</div>
+      <div class="chart-box" style="height:280px"><canvas id="chart-forecast"></canvas></div>
+    </div>
+
+    <!-- 到達予測 -->
+    <div class="card">
+      <div class="card-title">🎯 目標額到達予測</div>
+      <div id="fc-milestones"><div style="text-align:center;color:var(--sub);padding:20px;font-size:12px">設定を入力してください</div></div>
+    </div>
+  </div>
+
+  <!-- ── Bottom Nav (8 tabs) ── -->
   <nav class="bottom-nav">
     <button class="nav-btn active" onclick="switchTab('home',this)"><span class="icon">🏠</span>HOME</button>
     <button class="nav-btn" onclick="switchTab('portfolio',this)"><span class="icon">💼</span>PORTFOLIO</button>
@@ -554,25 +600,27 @@
     <button class="nav-btn" onclick="switchTab('rules',this)"><span class="icon">📋</span>RULES</button>
     <button class="nav-btn" onclick="switchTab('analytics',this)"><span class="icon">🔬</span>ANALYTICS</button>
     <button class="nav-btn" onclick="switchTab('market',this)"><span class="icon">🌐</span>MARKET</button>
+    <button class="nav-btn" onclick="switchTab('forecast',this)"><span class="icon">🔮</span>FORECAST</button>
   </nav>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
   <script>
-  const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbwC0_Vq8K1cs48SCrXr2gmDYeLLDmKvaSCU-vOGyxR0OEGFXDIvF4-upXj798bj2eUB/exec";
+  const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbx3nyrGGz0x58AG-c6Rw9sAS7PKcXXtj3ncZg5N2nxyzEsD4c7k8_Ih1KBNUbgIJkZnFQ/exec";
   const STORAGE_KEY   = "investment_funds_v2";
   const RULES_KEY     = "investment_rules_v1";
   const DISCORD_KEY   = "discord_webhook_url";
   const ALLORIGINS    = "https://api.allorigins.win/get?url=";
 
   /* ── 状態 ── */
-  const state = { portfolio:null, trades:null, prices:null, rules:null, monthly:null, analytics:null };
+  const state = { portfolio:null, trades:null, prices:null, rules:null, monthly:null, analytics:null, daily:null, history:null };
   let tradesAll = [];
   let autoTimer = null;
   let lastFGZone = '';
-  let chartAlloc=null, chartGain=null, chartMonth=null, chartPrices=null;
+  let chartAlloc=null, chartGain=null, chartMonth=null, chartPrices=null, chartDaily=null, chartHistory=null, chartForecast=null;
 
-  const PALETTE = ['#6c8aff','#4ecca3','#ff6b8a','#ffd93d','#ff9f43','#a29bfe','#74b9ff','#fd79a8','#55efc4','#fdcb6e'];
+  const PALETTE    = ['#6c8aff','#4ecca3','#ff6b8a','#ffd93d','#ff9f43','#a29bfe','#74b9ff','#fd79a8','#55efc4','#fdcb6e'];
+  const ACCT_LABEL = { '成長': '成長枠', '積立': '積立枠' };
 
   /* ── フォーマット ── */
   const yen = n => '¥' + Number(n).toLocaleString('ja-JP');
@@ -599,16 +647,20 @@
 
   /* ── Portfolio 正規化（日英どちらのキーでも対応） ── */
   function normalizePortfolio(r) {
+    const baseName  = r['投資信託名'] ?? r.name     ?? '';
+    const account   = r['口座']      ?? r.account   ?? '';
+    const label     = ACCT_LABEL[account] || account;
+    const principal = +(r['元本']         ?? r.principal ?? 0);
+    const units     = +(r['保有口数']     ?? r.units     ?? 0);
+    const avgNavRaw = +(r['平均取得基準価格'] ?? r.avgNav ?? 0);
     return {
-      name:          r['投資信託名']          ?? r.name          ?? '',
-      value:   +    (r['現在評価額']          ?? r.value         ?? 0),
-      principal:+   (r['元本']               ?? r.principal     ?? 0),
-      units:   +    (r['保有口数']            ?? r.units         ?? 0),
-      nav:     +    (r['最新基準価格']        ?? r.nav           ?? 0),
-      avgNav:  +    (r['平均取得基準価格']    ?? r.avgNav        ?? 0),
-      athPct:  +    (r['ATH差%']             ?? r.athPct        ?? 0),
-      mileageRate:+ (r['マイレージ利率(%)']   ?? r.mileageRate   ?? 0),
-      mileageAnnual:+(r['マイレージ年率(%)']  ?? r.mileageAnnual ?? 0),
+      name:      label ? `${baseName}(${label})` : baseName,
+      value:     +(r['現在評価額']    ?? r.value  ?? 0),
+      principal,
+      units,
+      nav:       +(r['最新基準価格'] ?? r.nav    ?? 0),
+      athPct:    +(r['ATH差%']       ?? r.athPct ?? 0),
+      avgNav:    avgNavRaw > 0 ? avgNavRaw : (units > 0 ? Math.round(principal / units * 10000) : 0),
     };
   }
 
@@ -642,9 +694,7 @@
          <td class="group-border ${cls(gain)}">${yen(gain)}</td>
          <td class="${cls(retRate)}">${pct(retRate)}</td>
          <td class="group-border">${num(f.units)}</td>
-         <td>${yen(f.nav)}</td><td>${yen(f.avgNav)}</td>
-         <td class="group-border">${f.mileageRate.toFixed(3)}%</td>
-         <td>${f.mileageAnnual.toFixed(3)}%</td>`;
+         <td>${yen(f.nav)}</td><td>${yen(f.avgNav)}</td>`;
       tbody.appendChild(tr);
     });
     document.getElementById('fund-foot').innerHTML =
@@ -653,8 +703,7 @@
        <td class="group-border">${yen(totPrin)}</td><td>100%</td>
        <td class="group-border ${cls(totGain)}">${yen(totGain)}</td>
        <td class="${cls(totRet)}">${pct(totRet)}</td>
-       <td class="group-border">—</td><td>—</td><td>—</td>
-       <td class="group-border">—</td><td>—</td></tr>`;
+       <td class="group-border">—</td><td>—</td><td>—</td></tr>`;
 
     renderAnalytics(funds);
   }
@@ -692,20 +741,21 @@
       if (type === 'all') return true;
       if (type === 'buy') return t.type === '買';
       if (type === 'sell') return t.type === '売';
-      if (type === 'nisa') return t.account.includes('NISA') || t.account.includes('つみたて');
-      if (type === 'tokutei') return t.account.includes('特定');
+      if (type === 'nisa') return t.account === '成長' || t.account === '積立' || t.account === '成長枠' || t.account === '積立枠';
+      if (type === 'tokutei') return t.account === '特定';
       return true;
     });
     const tbody = document.getElementById('trades-list');
     tbody.innerHTML = filtered.length ? '' : '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--sub)">該当なし</td></tr>';
     filtered.forEach(t => {
-      const accCls  = t.account.includes('NISA') ? 'account-nisa' : t.account.includes('iDeCo') ? 'account-ideco' : 'account-tokutei';
-      const typeCls = t.type === '買' ? 'buysell-buy' : 'buysell-sell';
+      const accLabel = ACCT_LABEL[t.account] || t.account;
+      const accCls   = (t.account === '成長' || t.account === '積立' || t.account === '成長枠' || t.account === '積立枠') ? 'account-nisa' : t.account === 'iDeCo' ? 'account-ideco' : 'account-tokutei';
+      const typeCls  = t.type === '買' ? 'buysell-buy' : 'buysell-sell';
       const tr = document.createElement('tr');
       tr.innerHTML =
         `<td class="col-name">${t.name}</td>
          <td>${t.date}</td>
-         <td><span class="account-badge ${accCls}">${t.account}</span></td>
+         <td><span class="account-badge ${accCls}">${accLabel}</span></td>
          <td><span class="buysell-badge ${typeCls}">${t.type}</span></td>
          <td>${t.amount ? yen(t.amount) : '—'}</td>
          <td>${t.units ? num(t.units) : '—'}</td>
@@ -724,7 +774,7 @@
         <div style="flex:1;font-size:12px;font-weight:600">${t.name}</div>
         <div style="text-align:right">
           <div style="font-size:13px;font-weight:700">${t.amount ? yen(t.amount) : '—'}</div>
-          <div style="font-size:10px;color:var(--sub)">${t.date} ｜ ${t.account}</div>
+          <div style="font-size:10px;color:var(--sub)">${t.date} ｜ ${ACCT_LABEL[t.account] || t.account}</div>
         </div>
       </div>`;
     }).join('');
@@ -759,8 +809,8 @@
     ce.textContent = pct(chgPct); ce.className = 'ps-value ' + cls(chgPct);
     document.getElementById('ps-count').textContent = rows.length + '件';
 
-    Chart.defaults.color = '#8b92b8';
-    Chart.defaults.borderColor = '#2e3250';
+    Chart.defaults.color = '#8590b8';
+    Chart.defaults.borderColor = '#404d6a';
     if (chartPrices) chartPrices.destroy();
     chartPrices = new Chart(document.getElementById('chart-prices').getContext('2d'), {
       type: 'line',
@@ -784,8 +834,8 @@
           tooltip: { callbacks: { label: ctx => '¥' + ctx.raw.toLocaleString('ja-JP') } }
         },
         scales: {
-          x: { grid:{color:'#2e3250'}, ticks:{color:'#8b92b8',font:{size:9},maxTicksLimit:8} },
-          y: { grid:{color:'#2e3250'}, ticks:{color:'#8b92b8',callback:v=>'¥'+v.toLocaleString('ja-JP')} }
+          x: { grid:{color:'#404d6a'}, ticks:{color:'#8590b8',font:{size:9},maxTicksLimit:8} },
+          y: { grid:{color:'#404d6a'}, ticks:{color:'#8590b8',callback:v=>'¥'+v.toLocaleString('ja-JP')} }
         }
       }
     });
@@ -821,8 +871,8 @@
   /* ════ ANALYTICS レンダリング ════ */
   function renderAnalytics(funds) {
     if (!funds || !funds.length) return;
-    Chart.defaults.color = '#8b92b8';
-    Chart.defaults.borderColor = '#2e3250';
+    Chart.defaults.color = '#8590b8';
+    Chart.defaults.borderColor = '#404d6a';
 
     /* 資産配分ドーナツ */
     if (chartAlloc) chartAlloc.destroy();
@@ -831,12 +881,12 @@
       plugins: [ChartDataLabels],
       data: {
         labels: funds.map(f => f.name),
-        datasets: [{ data: funds.map(f => f.value), backgroundColor: funds.map((_,i) => PALETTE[i%PALETTE.length]), borderColor:'#1a1d2e', borderWidth:3 }]
+        datasets: [{ data: funds.map(f => f.value), backgroundColor: funds.map((_,i) => PALETTE[i%PALETTE.length]), borderColor:'#28304a', borderWidth:3 }]
       },
       options: {
         responsive:true, maintainAspectRatio:false, cutout:'65%',
         plugins: {
-          legend: { position: window.innerWidth<600?'bottom':'right', labels:{color:'#e8eaf6',font:{size:10},boxWidth:12,padding:10} },
+          legend: { position: window.innerWidth<600?'bottom':'right', labels:{color:'#cdd5f0',font:{size:10},boxWidth:12,padding:10} },
           tooltip: { callbacks: { label: ctx => { const tot=ctx.dataset.data.reduce((a,b)=>a+b,0); return ctx.label+': ¥'+ctx.raw.toLocaleString('ja-JP')+' ('+(ctx.raw/tot*100).toFixed(1)+'%)'; } } },
           datalabels: { color:'white', font:{size:11,weight:'bold'}, formatter:(v,ctx)=>{ const tot=ctx.dataset.data.reduce((a,b)=>a+b,0); const p=v/tot*100; return p>=5?p.toFixed(1)+'%':''; } }
         }
@@ -853,7 +903,7 @@
       options: { indexAxis:'y', responsive:true, maintainAspectRatio:false, layout:{padding:{right:60}},
         plugins: { legend:{display:false}, tooltip:{callbacks:{label:ctx=>(ctx.raw>=0?'+':'')+ctx.raw.toFixed(2)+'%'}},
           datalabels:{anchor:'end',align:'right',color:ctx=>gainRates[ctx.dataIndex]>=0?'#4ecca3':'#ff6b8a',font:{size:11,weight:'bold'},formatter:v=>(v>=0?'+':'')+v.toFixed(2)+'%'} },
-        scales: { x:{grid:{color:'#2e3250'},ticks:{color:'#8b92b8',callback:v=>v+'%'}}, y:{grid:{display:false},ticks:{color:'#e8eaf6',font:{size:10}}} } }
+        scales: { x:{grid:{color:'#404d6a'},ticks:{color:'#8590b8',callback:v=>v+'%'}}, y:{grid:{display:false},ticks:{color:'#cdd5f0',font:{size:10}}} } }
     });
 
     /* ATHリスト（analyticsシートがあれば優先、なければportfolioから計算） */
@@ -880,7 +930,10 @@
       items = source.map(r => ({ name: r['銘柄']??r.name??'', athPct: +(r['ATH差%']??r.ath??0), judge: r['判定']??'' }));
     } else {
       const seen = {};
-      (funds||[]).forEach(f => { if (!(f.name in seen)) seen[f.name] = f.athPct ?? 0; });
+      (funds||[]).forEach(f => {
+        const baseName = f.name.replace(/\([^)]*\)$/, '').trim();
+        if (!(baseName in seen)) seen[baseName] = f.athPct ?? 0;
+      });
       items = Object.entries(seen).map(([name, athPct]) => ({ name, athPct, judge: '' }));
     }
     items.forEach(item => {
@@ -913,14 +966,254 @@
         ]
       },
       options: { responsive:true, maintainAspectRatio:false, layout:{padding:{top:22}},
-        plugins: { legend:{labels:{color:'#e8eaf6',font:{size:10}}},
+        plugins: { legend:{labels:{color:'#cdd5f0',font:{size:10}}},
           tooltip:{callbacks:{label:ctx=>'¥'+ctx.raw.toLocaleString('ja-JP')}},
           datalabels:{display:false} },
         scales: {
-          x:{grid:{display:false},ticks:{color:'#8b92b8',font:{size:9}}},
-          y:{grid:{color:'#2e3250'},ticks:{color:'#8b92b8',callback:v=>v===0?'0':(v/10000)+'万'}} }
+          x:{grid:{display:false},ticks:{color:'#8590b8',font:{size:9}}},
+          y:{grid:{color:'#404d6a'},ticks:{color:'#8590b8',callback:v=>v===0?'0':(v/10000)+'万'}} }
       }
     });
+  }
+
+  /* ════ 元本・利益 積み上げ面グラフ ════ */
+  function renderHistoryChart(history) {
+    if (!history || !history.length) return;
+    Chart.defaults.color = '#8590b8';
+    Chart.defaults.borderColor = '#404d6a';
+    const labels    = history.map(r => r.date ?? r['日付'] ?? '');
+    const principal = history.map(r => r.principal ?? 0);
+    const profit    = history.map(r => Math.max(0, (r.value ?? 0) - (r.principal ?? 0)));
+    if (chartHistory) chartHistory.destroy();
+    chartHistory = new Chart(document.getElementById('chart-history').getContext('2d'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: '元本',
+            data: principal,
+            backgroundColor: 'rgba(108,138,255,.55)',
+            borderColor: '#6c8aff',
+            borderWidth: 1.5,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            stack: 'portfolio',
+          },
+          {
+            label: '含み益',
+            data: profit,
+            backgroundColor: 'rgba(78,204,163,.45)',
+            borderColor: '#4ecca3',
+            borderWidth: 1.5,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            stack: 'portfolio',
+          },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#e8eaf6', font: { size: 10 }, boxWidth: 12, padding: 10 } },
+          tooltip: {
+            callbacks: {
+              label: ctx => ctx.dataset.label + ': ¥' + ctx.raw.toLocaleString('ja-JP'),
+              footer: items => '評価額合計: ¥' + (items.reduce((s, i) => s + i.raw, 0)).toLocaleString('ja-JP'),
+            }
+          },
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { stacked: true, grid: { display: false }, ticks: { color: '#8b92b8', font: { size: 9 }, maxTicksLimit: 8 } },
+          y: { stacked: true, grid: { color: '#2e3250' }, ticks: { color: '#8b92b8', callback: v => (v / 10000).toFixed(0) + '万' } }
+        }
+      }
+    });
+  }
+
+  /* ════ 日次収支チャート ════ */
+  function renderDailyChart(daily) {
+    if (!daily || !daily.length) return;
+    const rows = daily.slice(-90);
+    Chart.defaults.color = '#8590b8';
+    Chart.defaults.borderColor = '#404d6a';
+    if (chartDaily) chartDaily.destroy();
+    chartDaily = new Chart(document.getElementById('chart-daily').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: rows.map(r => r.date ?? r['日付'] ?? ''),
+        datasets: [{
+          data: rows.map(r => r.dailyChange ?? r['収支前日比'] ?? 0),
+          backgroundColor: rows.map(r => (r.dailyChange ?? r['収支前日比'] ?? 0) >= 0 ? 'rgba(78,204,163,.65)' : 'rgba(255,107,138,.65)'),
+          borderColor:     rows.map(r => (r.dailyChange ?? r['収支前日比'] ?? 0) >= 0 ? '#4ecca3' : '#ff6b8a'),
+          borderWidth: 1, borderRadius: 3,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => (ctx.raw >= 0 ? '+' : '') + '¥' + ctx.raw.toLocaleString('ja-JP') } },
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { grid:{ display:false }, ticks:{ color:'#8590b8', font:{ size:9 }, maxTicksLimit:10 } },
+          y: { grid:{ color:'#404d6a' }, ticks:{ color:'#8590b8', callback: v => (v===0?'0':(v>=0?'+':'')+(v/10000).toFixed(1)+'万') } }
+        }
+      }
+    });
+  }
+
+  /* ════ FORECAST タブ ════ */
+  function initForecastTab() {
+    // 現在の評価額
+    const curVal = state.portfolio ? state.portfolio.reduce((s,f) => s+f.value, 0) : 0;
+    document.getElementById('fc-cur-value').textContent = yen(curVal);
+
+    // 月平均投資額（直近12ヶ月の買い平均）
+    if (tradesAll.length) {
+      const buyTrades = tradesAll.filter(t => t.type === '買');
+      const monthMap  = {};
+      buyTrades.forEach(t => {
+        const m = t.date.slice(0, 7);
+        monthMap[m] = (monthMap[m] || 0) + t.amount;
+      });
+      const months     = Object.keys(monthMap).sort();
+      const recent12   = months.slice(-12);
+      const avgMonthly = recent12.reduce((s,m) => s+monthMap[m], 0) / (recent12.length || 1);
+      document.getElementById('fc-actual-monthly').textContent = yen(Math.round(avgMonthly));
+      const el = document.getElementById('fc-monthly');
+      if (!el.value) el.value = Math.round(avgMonthly / 10000) * 10000;
+    }
+
+    // 推定年率リターン（historyデータから・1年以上のデータがある場合のみ反映）
+    if (state.history && state.history.length > 1) {
+      const first = state.history.find(r => r.principal > 0);
+      const last  = state.history[state.history.length - 1];
+      if (first && last && first.principal > 0) {
+        const days  = (new Date(last.date) - new Date(first.date)) / 86400000;
+        const years = days / 365;
+        if (years > 0.1) {
+          const totalGainPct = (last.value - last.principal) / last.principal;
+          const annualReturn = (Math.pow(1 + totalGainPct, 1 / years) - 1) * 100;
+          document.getElementById('fc-actual-return').textContent =
+            annualReturn.toFixed(1) + '%' + (years < 1 ? '（参考：1年未満）' : '');
+          document.getElementById('fc-period').textContent = years.toFixed(1) + '年';
+          // 1年以上のデータかつ現実的な範囲（1〜20%）のみ自動反映
+          const retInput = document.getElementById('fc-return');
+          if (years >= 1 && annualReturn > 0 && annualReturn <= 20) {
+            retInput.value = Math.round(annualReturn * 2) / 2;
+          }
+        }
+      }
+    }
+
+    updateForecast();
+  }
+
+  function updateForecast() {
+    const annualRate    = parseFloat(document.getElementById('fc-return').value) || 0;
+    const monthlyInvest = parseFloat(document.getElementById('fc-monthly').value) || 0;
+    const years         = parseInt(document.getElementById('fc-years').value) || 20;
+    const pv            = state.portfolio ? state.portfolio.reduce((s,f) => s+f.value, 0) : 0;
+    const r             = annualRate / 100 / 12;
+    const curYear       = new Date().getFullYear();
+
+    const labels      = [];
+    const projected   = [];
+    const accumOnly   = [];
+
+    for (let y = 0; y <= years; y++) {
+      const n = y * 12;
+      labels.push(curYear + y);
+      const fv = r === 0
+        ? pv + monthlyInvest * n
+        : pv * Math.pow(1+r, n) + monthlyInvest * (Math.pow(1+r, n) - 1) / r;
+      projected.push(Math.round(fv));
+      accumOnly.push(Math.round(pv + monthlyInvest * n));
+    }
+
+    renderForecastChart(labels, projected, accumOnly);
+    renderMilestones(projected, labels, pv, monthlyInvest, r);
+  }
+
+  function renderForecastChart(labels, projected, accumOnly) {
+    Chart.defaults.color = '#8590b8';
+    Chart.defaults.borderColor = '#404d6a';
+    if (chartForecast) chartForecast.destroy();
+    chartForecast = new Chart(document.getElementById('chart-forecast').getContext('2d'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: '予測評価額',
+            data: projected,
+            borderColor: '#7b8cff',
+            backgroundColor: 'rgba(123,140,255,.15)',
+            fill: true,
+            tension: 0.4,
+            pointRadius: 3,
+            pointHoverRadius: 6,
+          },
+          {
+            label: '積立のみ（リターンなし）',
+            data: accumOnly,
+            borderColor: '#8590b8',
+            backgroundColor: 'transparent',
+            borderDash: [5,4],
+            tension: 0.4,
+            pointRadius: 0,
+            fill: false,
+          }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#cdd5f0', font: { size: 10 }, boxWidth: 12 } },
+          tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ¥' + ctx.raw.toLocaleString('ja-JP') } },
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { grid:{ display:false }, ticks:{ color:'#8590b8', font:{ size:9 } } },
+          y: { grid:{ color:'#404d6a' }, ticks:{ color:'#8590b8', callback: v => {
+            if (v >= 100000000) return (v/100000000).toFixed(v%100000000===0?0:1)+'億';
+            if (v >= 10000)     return (v/10000).toLocaleString('ja-JP')+'万';
+            return v.toLocaleString('ja-JP');
+          }}}
+        }
+      }
+    });
+  }
+
+  function renderMilestones(projected, labels, pv, monthlyInvest, r) {
+    const TARGETS = [1000, 2000, 3000, 5000, 10000, 20000, 30000, 50000, 100000];
+    const el = document.getElementById('fc-milestones');
+    const rows = TARGETS.map(targetMan => {
+      const target = targetMan * 10000;
+      if (pv >= target) return null;
+      const idx = projected.findIndex(v => v >= target);
+      if (idx === -1) return { target: targetMan, label: '期間内に到達できません' };
+      return { target: targetMan, year: labels[idx], yearsFrom: idx };
+    }).filter(Boolean);
+
+    if (!rows.length) { el.innerHTML = '<div style="text-align:center;color:var(--sub);padding:16px;font-size:12px">全目標達成済み</div>'; return; }
+
+    el.innerHTML = rows.map(r => {
+      const color = r.yearsFrom === undefined ? 'var(--sub)' : r.yearsFrom <= 10 ? 'var(--pos)' : r.yearsFrom <= 20 ? 'var(--accent)' : 'var(--sub)';
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:11px 4px;border-bottom:1px solid var(--border)">
+        <span style="font-size:13px;font-weight:700">¥${targetMan(r)}万</span>
+        <span style="font-size:13px;font-weight:700;color:${color}">${r.year ? r.year+'年（あと'+r.yearsFrom+'年）' : r.label}</span>
+      </div>`;
+    }).join('');
+
+    function targetMan(row) { return row.target.toLocaleString('ja-JP'); }
   }
 
   /* ════ MARKET リアルタイム取得 ════ */
@@ -1245,6 +1538,8 @@
         fetchSheet('rules').then(data => { state.rules=data; renderRulesFromSheet(data); }),
         fetchSheet('monthly').then(data => { state.monthly=data; renderMonthlyChart(data); }),
         fetchSheet('analytics').then(data => { if (Array.isArray(data) && data.length) { state.analytics=data; renderAthList(data, state.portfolio); } }),
+        fetchSheet('daily').then(data => { if (Array.isArray(data) && data.length) { state.daily=data; renderDailyChart(data); } }),
+        fetchSheet('history').then(data => { if (Array.isArray(data) && data.length) { state.history=data; renderHistoryChart(data); } }),
       ]);
       setStatus('✅ '+new Date().toLocaleTimeString('ja-JP'));
     } catch(e) { setStatus('⚠️ 一部取得失敗'); }
@@ -1277,6 +1572,9 @@
     /* リアルタイム市場・ニュース */
     fetchRealMarket();
     fetchNews();
+
+    /* FORECASTタブ初期化 */
+    initForecastTab();
   })();
   </script>
 </body>
