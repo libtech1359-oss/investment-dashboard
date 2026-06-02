@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python C:\\\\AI\\\\show_time.py)",
+      "PowerShell(python -X utf8 C:\\\\AI\\\\show_time.py)",
+      "Bash(rm -rf \"D:/AI/discord-secretary\" \"D:/AI/whisper-env\" \"D:/AI/sheets-setup\")",
+      "Bash(rm \"D:/AI/audio.wav\" \"D:/AI/test_js.js\" \"D:/AI/whisper_test.py\" \"D:/AI/show_time.py\" \"D:/AI/deploy.ps1\" \"D:/AI/watch-deploy.ps1\")",
+      "PowerShell(cmd /c rmdir \"C:\\\\AI\")"
+    ]
+  }
+}

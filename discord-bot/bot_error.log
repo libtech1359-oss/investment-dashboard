@@ -1,0 +1,5 @@
+[interaction] type=2 cmd=market user=ryo08168
+[interaction] type=2 cmd=portfolio user=ryo08168
+[interaction] type=2 cmd=buy user=ryo08168
+[interaction] type=2 cmd=nisa user=ryo08168
+[interaction] type=2 cmd=rules user=ryo08168

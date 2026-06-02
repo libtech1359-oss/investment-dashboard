@@ -1,0 +1,17 @@
+{
+  "name": "ai-corp",
+  "version": "1.0.0",
+  "description": "AI投資法人 マルチエージェントシステム",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.2.1",
+    "ollama": "^0.6.3"
+  }
+}

@@ -1,0 +1,6 @@
+.env
+node_modules/
+memory.db
+logs/
+data/tasks/
+bot_output.log
