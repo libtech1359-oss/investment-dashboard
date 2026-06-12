@@ -10,13 +10,13 @@
         --text:#cdd5f0; --sub:#8590b8; --pos:#3dd6a8; --neg:#ff6b8a;
       }
       *{box-sizing:border-box;margin:0;padding:0}
-      body{font-family:'Segoe UI','Hiragino Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:72px}
+      body{font-family:'Segoe UI','Hiragino Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:92px}
       .app-bar{background:var(--surface);border-bottom:1px solid var(--border);box-shadow:0 1px 8px rgba(0,0,0,.2);padding:14px 18px;display:flex;align-items:center;position:sticky;top:0;z-index:100}
       .app-bar h1{font-size:16px;font-weight:700}
       .app-bar .status{margin-left:auto;font-size:11px;color:var(--sub);text-align:right}
       .tab{display:none;padding:16px}
       .tab.active{display:block}
-      .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -1px 10px rgba(0,0,0,.2);display:flex;z-index:100;overflow-x:auto;scrollbar-width:none;padding-bottom:env(safe-area-inset-bottom)}
+      .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -1px 10px rgba(0,0,0,.2);display:flex;z-index:100;overflow-x:auto;scrollbar-width:none;padding-bottom:max(env(safe-area-inset-bottom),20px)}
       .bottom-nav::-webkit-scrollbar{display:none}
       .nav-btn{flex:1 0 52px;display:flex;flex-direction:column;align-items:center;padding:7px 2px 9px;cursor:pointer;color:var(--sub);font-size:8px;font-weight:700;letter-spacing:0.3px;gap:3px;border:none;background:none;transition:color .15s;white-space:nowrap}
       .nav-btn .icon{font-size:19px;line-height:1}
@@ -205,7 +205,7 @@
       .fund-chart-buy-panel{position:relative;height:72px}
       .fund-chart-divider{font-size:9px;color:var(--sub);font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:4px;padding-top:4px}
       @media (max-width:430px) and (orientation:portrait) {
-        body{font-size:13px;padding-bottom:124px}
+        body{font-size:13px;padding-bottom:144px}
         .app-bar{padding:10px 14px}
         .tab{padding:12px}
         .card{padding:14px 12px;margin-bottom:10px}
