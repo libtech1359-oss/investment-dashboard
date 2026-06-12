@@ -196,8 +196,16 @@
       .idx-chg.down{color:var(--neg)}
       .idx-updated{font-size:10px;color:var(--sub);text-align:right;margin-bottom:10px}
       .idx-loading{text-align:center;color:var(--sub);padding:20px;font-size:12px}
+      .fund-chart-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:14px;margin-bottom:14px}
+      .fund-chart-header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+      .fund-chart-ico{font-size:18px;line-height:1;flex-shrink:0}
+      .fund-chart-name{flex:1;font-size:13px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .fund-chart-meta{text-align:right;flex-shrink:0}
+      .fund-chart-nav-panel{position:relative;height:180px;margin-bottom:6px}
+      .fund-chart-buy-panel{position:relative;height:72px}
+      .fund-chart-divider{font-size:9px;color:var(--sub);font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:4px;padding-top:4px}
       @media (max-width:430px) and (orientation:portrait) {
-        body{font-size:13px}
+        body{font-size:13px;padding-bottom:124px}
         .app-bar{padding:10px 14px}
         .tab{padding:12px}
         .card{padding:14px 12px;margin-bottom:10px}
@@ -213,8 +221,9 @@
         #gain-wrap{height:auto!important}
         .input-label{min-width:90px;font-size:11px}
         .cash-input{width:120px;font-size:14px}
-        .nav-btn{font-size:7px;padding:6px 1px 8px}
-        .nav-btn .icon{font-size:16px}
+        .bottom-nav{flex-wrap:wrap;overflow-x:visible;justify-content:center}
+        .nav-btn{flex:0 0 20%;font-size:8px;padding:7px 2px 8px}
+        .nav-btn .icon{font-size:18px}
         .ath-name{font-size:11px}
         .ath-pct{font-size:13px;min-width:52px}
       }
@@ -548,6 +557,19 @@
       </div>
     </div>
 
+    <!-- ⑩ CHARTS -->
+    <div class="tab" id="tab-charts">
+      <div class="card" style="padding:10px 14px;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button class="btn btn-sync" onclick="renderFundCharts()">🔄 更新</button>
+          <span style="font-size:11px;color:var(--sub)">2025/08/05〜現在　上：基準価格推移　下：買付額</span>
+        </div>
+      </div>
+      <div id="fund-charts-list">
+        <div style="text-align:center;color:var(--sub);padding:40px;font-size:12px">データ読み込み中...</div>
+      </div>
+    </div>
+
     <!-- ── Bottom Nav ── -->
     <nav class="bottom-nav">
       <button class="nav-btn active" onclick="switchTab('home',this)"><span class="icon">🏠</span>HOME</button>
@@ -559,6 +581,7 @@
       <button class="nav-btn" onclick="switchTab('market',this)"><span class="icon">🌐</span>MARKET</button>
       <button class="nav-btn" onclick="switchTab('forecast',this)"><span class="icon">🔮</span>FORECAST</button>
       <button class="nav-btn" onclick="switchTab('indices',this)"><span class="icon">🌍</span>指数</button>
+      <button class="nav-btn" onclick="switchTab('charts',this)"><span class="icon">📊</span>CHARTS</button>
     </nav>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -574,6 +597,7 @@
     let autoTimer = null;
     let lastFGZone = '';
     let chartAlloc=null, chartGain=null, chartMonth=null, chartPrices=null, chartDaily=null, chartHistory=null, chartForecast=null;
+    let fundCharts = {};
 
     const PALETTE    = ['#6c8aff','#4ecca3','#ff6b8a','#ffd93d','#ff9f43','#a29bfe','#74b9ff','#fd79a8','#55efc4','#fdcb6e'];
     const ACCT_LABEL = { '成長': '成長枠', '積立': '積立枠' };
@@ -596,6 +620,7 @@
         if (state.portfolio) renderAnalytics(state.portfolio);
       }
       if (name === 'indices' && !state.market) refreshIndicesTab();
+      if (name === 'charts') renderFundCharts();
     }
 
     async function fetchSheet(sheet) {
@@ -1436,6 +1461,128 @@
       const blob=new Blob([cached],{type:'application/json'});
       const url=URL.createObjectURL(blob);
       const a=document.createElement('a'); a.href=url; a.download='portfolio.json'; a.click(); URL.revokeObjectURL(url);
+    }
+
+    function renderFundCharts() {
+      const container = document.getElementById('fund-charts-list');
+      if (!state.prices || !state.prices.length) {
+        container.innerHTML = '<div style="text-align:center;color:var(--sub);padding:40px;font-size:12px">データを更新してください</div>';
+        return;
+      }
+      const START = '2025-08-05';
+      const ICONS = {'FANG+':'🔮','オルカン':'🌍','S&P500':'📈','NASDAQ100':'💻','半導体':'💾','ゴールド':'🥇','Zテック20':'🤖','国内株式':'🇯🇵','宇宙株':'🚀'};
+
+      // ファンド別にNAVを集計
+      const byFund = {};
+      state.prices.forEach(p => {
+        if (p.date < START) return;
+        if (!byFund[p.name]) byFund[p.name] = [];
+        byFund[p.name].push(p);
+      });
+      Object.values(byFund).forEach(rows => rows.sort((a,b) => new Date(a.date)-new Date(b.date)));
+
+      // ファンド別・日付別に買付額を集計
+      const buysByFund = {};
+      tradesAll.forEach(t => {
+        if (t.type !== '買' || t.date < START) return;
+        if (!buysByFund[t.name]) buysByFund[t.name] = {};
+        buysByFund[t.name][t.date] = (buysByFund[t.name][t.date] || 0) + t.amount;
+      });
+
+      // 既存チャートを破棄
+      Object.values(fundCharts).forEach(p => { if(p.nav) p.nav.destroy(); if(p.buy) p.buy.destroy(); });
+      fundCharts = {};
+      container.innerHTML = '';
+
+      Chart.defaults.color = '#8590b8';
+      Chart.defaults.borderColor = '#404d6a';
+
+      Object.keys(byFund).forEach((name, idx) => {
+        const navRows  = byFund[name];
+        if (!navRows.length) return;
+        const labels   = navRows.map(r => r.date);
+        const navData  = navRows.map(r => r.price);
+        const fundBuys = buysByFund[name] || {};
+        const buyData  = labels.map(d => fundBuys[d] || 0);
+        const hasBuys  = buyData.some(v => v > 0);
+        const totalBuy = Object.values(fundBuys).reduce((s,v) => s+v, 0);
+        const latest   = navData[navData.length-1];
+        const first    = navData[0];
+        const chgPct   = first > 0 ? (latest-first)/first*100 : 0;
+        const navId    = 'fc-nav-' + idx;
+        const buyId    = 'fc-buy-' + idx;
+
+        const card = document.createElement('div');
+        card.className = 'fund-chart-card';
+        card.innerHTML =
+          `<div class="fund-chart-header">
+            <span class="fund-chart-ico">${ICONS[name]||'📊'}</span>
+            <span class="fund-chart-name">${name}</span>
+            <div class="fund-chart-meta">
+              <div style="font-size:14px;font-weight:700">${yen(latest)}</div>
+              <div style="font-size:10px" class="${cls(chgPct)}">${pct(chgPct)}<span style="font-size:9px;color:var(--sub);margin-left:4px">期間中</span></div>
+            </div>
+          </div>
+          <div class="fund-chart-nav-panel"><canvas id="${navId}"></canvas></div>
+          ${hasBuys
+            ? `<div class="fund-chart-divider">買付実績 合計 ${yen(totalBuy)}</div>
+               <div class="fund-chart-buy-panel"><canvas id="${buyId}"></canvas></div>`
+            : '<div style="font-size:10px;color:var(--sub);text-align:center;padding:6px 0">この期間の買付なし</div>'
+          }`;
+        container.appendChild(card);
+
+        // 基準価格折れ線グラフ
+        const navChart = new Chart(document.getElementById(navId).getContext('2d'), {
+          type: 'line',
+          data: { labels, datasets: [{
+            data: navData,
+            borderColor: '#6c8aff', backgroundColor: 'rgba(108,138,255,.08)',
+            fill: true, tension: 0.3, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1.5,
+          }]},
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode:'index', intersect:false },
+            plugins: {
+              legend: { display:false },
+              tooltip: { callbacks:{ label: ctx => '¥'+ctx.raw.toLocaleString('ja-JP') } },
+              datalabels: { display:false }
+            },
+            scales: {
+              x: { grid:{display:false}, ticks:{color:'#8590b8',font:{size:8},maxTicksLimit:6} },
+              y: { grid:{color:'#404d6a'}, ticks:{color:'#8590b8',font:{size:8},callback:v=>'¥'+v.toLocaleString('ja-JP')} }
+            }
+          }
+        });
+        fundCharts[name] = { nav: navChart, buy: null };
+
+        // 買付額棒グラフ
+        if (hasBuys) {
+          const buyChart = new Chart(document.getElementById(buyId).getContext('2d'), {
+            type: 'bar',
+            data: { labels, datasets: [{
+              data: buyData,
+              backgroundColor: 'rgba(78,204,163,.65)', borderColor: '#4ecca3',
+              borderWidth: 1, borderRadius: 3,
+            }]},
+            options: {
+              responsive: true, maintainAspectRatio: false,
+              plugins: {
+                legend: { display:false },
+                tooltip: {
+                  filter: item => item.raw > 0,
+                  callbacks: { label: ctx => '買付 ¥'+ctx.raw.toLocaleString('ja-JP') }
+                },
+                datalabels: { display:false }
+              },
+              scales: {
+                x: { grid:{display:false}, ticks:{color:'#8590b8',font:{size:8},maxTicksLimit:6} },
+                y: { grid:{color:'#404d6a'}, min:0, ticks:{color:'#8590b8',font:{size:8},callback:v=>v===0?'':(v/10000)+'万'} }
+              }
+            }
+          });
+          fundCharts[name].buy = buyChart;
+        }
+      });
     }
 
     (async function init(){
