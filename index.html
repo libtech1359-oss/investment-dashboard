@@ -18,7 +18,7 @@
       .tab.active{display:block}
       .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -1px 10px rgba(0,0,0,.2);display:flex;z-index:100;overflow-x:auto;scrollbar-width:none;padding-bottom:max(env(safe-area-inset-bottom),20px)}
       .bottom-nav::-webkit-scrollbar{display:none}
-      .nav-btn{flex:1 0 52px;display:flex;flex-direction:column;align-items:center;padding:7px 2px 9px;cursor:pointer;color:var(--sub);font-size:8px;font-weight:700;letter-spacing:0.3px;gap:3px;border:none;background:none;transition:color .15s;white-space:nowrap}
+      .nav-btn{flex:1 0 52px;display:flex;flex-direction:column;align-items:center;padding:7px 2px 9px;cursor:pointer;color:var(--sub);font-size:8px;font-weight:700;letter-spacing:0.3px;gap:3px;border:none;background:none;transition:color .15s;white-space:nowrap;text-decoration:none}
       .nav-btn .icon{font-size:19px;line-height:1}
       .nav-btn.active{color:var(--accent)}
       .nav-btn:hover{color:var(--text)}
@@ -349,7 +349,7 @@
         <div class="input-group">
           <div class="input-row">
             <span class="input-label">現在の現金残高</span>
-            <input type="number" class="cash-input" id="cash-input" placeholder="3000000" min="0" step="10000" oninput="updateRules()">
+            <input type="number" class="cash-input" id="cash-input" placeholder="2000000" min="0" step="10000" oninput="updateRules()">
             <span class="input-unit">円</span>
           </div>
           <div class="input-row">
@@ -377,16 +377,16 @@
         <div class="rule-card off" id="rule1-card">
           <span class="rc-badge" id="rule1-badge">📋</span>
           <div class="rc-body">
-            <div class="rc-title">① 現金300万円維持ルール</div>
-            <div class="rc-desc" id="rule1-desc">通常時は常に現金を300万円以上キープする</div>
+            <div class="rc-title">① 現金200万円維持ルール</div>
+            <div class="rc-desc" id="rule1-desc">通常時は常に現金を200万円以上キープする</div>
           </div>
           <span class="rc-badge-text" id="rule1-status">—</span>
         </div>
         <div class="rule-card off" id="rule2-card">
           <span class="rc-badge" id="rule2-badge">📉</span>
           <div class="rc-body">
-            <div class="rc-title">② 暴落時100万円特別投資枠</div>
-            <div class="rc-desc" id="rule2-desc">暴落時のみ有効・最低現金200万円を維持しつつ最大100万円追加投資可</div>
+            <div class="rc-title">② 暴落時50万円特別投資枠</div>
+            <div class="rc-desc" id="rule2-desc">暴落時のみ有効・最低現金150万円を維持しつつ最大50万円追加投資可</div>
           </div>
           <span class="rc-badge-text" id="rule2-status">OFF</span>
         </div>
@@ -400,7 +400,7 @@
         <div class="stat-card off" id="crash-remain-card">
           <div class="sc-label">暴落枠残高</div>
           <div class="sc-value" id="crash-remain-value">—</div>
-          <div class="sc-desc" id="crash-remain-desc">100万円枠の残り</div>
+          <div class="sc-desc" id="crash-remain-desc">50万円枠の残り</div>
         </div>
       </div>
     </div>
@@ -513,6 +513,16 @@
               <option value="40">40年</option>
             </select>
           </div>
+          <div class="input-row">
+            <span class="input-label">7月ボーナス追加投資</span>
+            <input type="number" class="cash-input" id="fc-bonus-july" placeholder="0" min="0" step="10000" oninput="updateForecast()">
+            <span class="input-unit">円/年</span>
+          </div>
+          <div class="input-row">
+            <span class="input-label">12月ボーナス追加投資</span>
+            <input type="number" class="cash-input" id="fc-bonus-dec" placeholder="0" min="0" step="10000" oninput="updateForecast()">
+            <span class="input-unit">円/年</span>
+          </div>
         </div>
       </div>
       <div class="summary-grid" style="margin-bottom:14px">
@@ -582,6 +592,7 @@
       <button class="nav-btn" onclick="switchTab('forecast',this)"><span class="icon">🔮</span>FORECAST</button>
       <button class="nav-btn" onclick="switchTab('indices',this)"><span class="icon">🌍</span>指数</button>
       <button class="nav-btn" onclick="switchTab('charts',this)"><span class="icon">📊</span>CHARTS</button>
+      <a class="nav-btn" href="index2.html"><span class="icon">💹</span>FUND</a>
     </nav>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -995,8 +1006,6 @@
         const recent12   = months.slice(-12);
         const avgMonthly = recent12.reduce((s,m)=>s+monthMap[m],0)/(recent12.length||1);
         document.getElementById('fc-actual-monthly').textContent = yen(Math.round(avgMonthly));
-        const el = document.getElementById('fc-monthly');
-        if (!el.value) el.value = Math.round(avgMonthly/10000)*10000;
       }
       if (state.history && state.history.length > 1) {
         const first = state.history.find(r => r.principal > 0);
@@ -1020,15 +1029,25 @@
     function updateForecast() {
       const annualRate    = parseFloat(document.getElementById('fc-return').value) || 0;
       const monthlyInvest = parseFloat(document.getElementById('fc-monthly').value) || 0;
+      const bonusJuly     = parseFloat(document.getElementById('fc-bonus-july').value) || 0;
+      const bonusDec      = parseFloat(document.getElementById('fc-bonus-dec').value) || 0;
       const years         = parseInt(document.getElementById('fc-years').value) || 20;
       const pv            = state.portfolio ? state.portfolio.reduce((s,f) => s+f.value, 0) : 0;
       const r             = annualRate / 100 / 12;
       const curYear       = new Date().getFullYear();
-      const labels=[], projected=[], accumOnly=[];
-      for (let y=0; y<=years; y++) {
-        const n=y*12; labels.push(curYear+y);
-        const fv=r===0?pv+monthlyInvest*n:pv*Math.pow(1+r,n)+monthlyInvest*(Math.pow(1+r,n)-1)/r;
-        projected.push(Math.round(fv)); accumOnly.push(Math.round(pv+monthlyInvest*n));
+      const annualExtra   = bonusJuly + bonusDec;
+      const labels = [curYear], projected = [Math.round(pv)], accumOnly = [Math.round(pv)];
+      let val = pv;
+      for (let y = 1; y <= years; y++) {
+        for (let m = 1; m <= 12; m++) {
+          val += monthlyInvest;
+          if (m === 7)  val += bonusJuly;
+          if (m === 12) val += bonusDec;
+          val *= (1 + r);
+        }
+        labels.push(curYear + y);
+        projected.push(Math.round(val));
+        accumOnly.push(Math.round(pv + (monthlyInvest * 12 + annualExtra) * y));
       }
       renderForecastChart(labels, projected, accumOnly);
       renderMilestones(projected, labels, pv, monthlyInvest, r);
@@ -1262,7 +1281,7 @@
       if(btn){ btn.disabled=false; btn.textContent='🔄 更新'; }
     }
 
-    const NORMAL_MIN=3000000, CRASH_MIN=2000000, CRASH_FUND=1000000;
+    const NORMAL_MIN=2000000, CRASH_MIN=1500000, CRASH_FUND=500000;
 
     function saveRulesData() {
       localStorage.setItem(RULES_KEY,JSON.stringify({
@@ -1292,7 +1311,7 @@
         setRuleCard('rule2','off','📉',crashMode?'暴落モード ON':'暴落モード OFF',crashMode?'ON':'OFF');
         setBigStatus('off','—','現金残高を入力してください','');
         setStatCard('surplus','off','—','基準との差額');
-        setStatCard('crash-remain','off','—','100万円枠の残り');
+        setStatCard('crash-remain','off','—','50万円枠の残り');
         return;
       }
       const cashMin=crashMode?CRASH_MIN:NORMAL_MIN;
@@ -1301,7 +1320,7 @@
       if(cashVal>=NORMAL_MIN) setRuleCard('rule1','ok','✅',`現金 ${yen(cashVal)} ｜ 基準 ${yen(NORMAL_MIN)} を満たしています`,'OK');
       else if(crashMode&&cashVal>=CRASH_MIN) setRuleCard('rule1','warn','⚠️',`暴落モード中 ｜ 暴落時基準 ${yen(CRASH_MIN)}は維持`,'暴落中');
       else setRuleCard('rule1','ng','❌',`現金不足 ｜ あと ${yen(cashMin-cashVal)} 必要`,'NG');
-      if(!crashMode) setRuleCard('rule2','off','📉','暴落モード OFF ｜ 通常の300万円ルール適用中','OFF');
+      if(!crashMode) setRuleCard('rule2','off','📉','暴落モード OFF ｜ 通常の200万円ルール適用中','OFF');
       else if(crashRemaining>0) setRuleCard('rule2','ok','✅',`暴落枠 残 ${yen(crashRemaining)} ｜ 最低 ${yen(CRASH_MIN)}を維持しつつ追加投資可`,`残 ${yen(crashRemaining)}`);
       else setRuleCard('rule2','ng','❌',`暴落枠 ${yen(CRASH_FUND)} を使い切りました`,'枠なし');
       const canInvest=surplus>=0&&(!crashMode||crashRemaining>0);
@@ -1462,6 +1481,8 @@
       const url=URL.createObjectURL(blob);
       const a=document.createElement('a'); a.href=url; a.download='portfolio.json'; a.click(); URL.revokeObjectURL(url);
     }
+
+    // ── 銘柄別NAV チャート（CHARTS タブ）────────────────
 
     function renderFundCharts() {
       const container = document.getElementById('fund-charts-list');
