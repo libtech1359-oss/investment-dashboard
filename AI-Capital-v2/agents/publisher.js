@@ -527,8 +527,8 @@ AI Capitalは「何もしない理由を探す会議」ではない。
 最後の結論も「総合的に慎重ながら〜」のような曖昧な要約表現は禁止。判定の延長として簡潔に書くこと（例：「よって観測ポジション構築を支持する」）。全体3〜4行以内。）
 
 ## ⚖️ 最終判断
-【最重要】構造ブロック（🟢🎯💴🤖）はシステムが挿入する。ここには相沢レイの補足コメント（1〜2文）のみを書くこと。
-禁止：「対象銘柄：」「金額：」「根拠：」「シグナル：」「全社合意」「（🟢🎯💴🤖）」などの記述。コンテキストの内容をそのまま転記すること全般。
+【最重要】構造ブロック（シグナル／対象／金額／部署判断の4行）はシステムが挿入する。ここには相沢レイの補足コメント（1〜2文）のみを書くこと。
+禁止：「対象銘柄：」「金額：」「根拠：」「シグナル：」「全社合意」などの記述。コンテキストの内容をそのまま転記すること全般。
 書き方例：「市場の過度な恐怖を踏まえ、最小限のポジション構築という結論に至りました。」のように相沢レイの言葉で1〜2文のみ。
 
 ## 🔴 本日の論点
@@ -782,23 +782,20 @@ function injectRecommendationSummary(note, recs, decision, pf) {
   }
   const totalVotes = voteCount.buy + voteCount.wait + voteCount.defend;
 
-  const lines = [
-    '🟢 シグナル',
-    signalLabel,
-    '🎯 対象',
-    assetName,
-  ];
-  if (finalAmt > 0) {
-    lines.push('💴 金額');
-    lines.push(`¥${finalAmt.toLocaleString()}`);
-  }
+  const voteParts = [];
   if (totalVotes > 0) {
-    lines.push('🤖 全社判断');
-    lines.push(`${totalVotes}部署中`);
-    if (voteCount.buy    > 0) lines.push(`賛成${voteCount.buy}`);
-    if (voteCount.wait   > 0) lines.push(`様子見${voteCount.wait}`);
-    if (voteCount.defend > 0) lines.push(`反対${voteCount.defend}`);
+    voteParts.push(`${totalVotes}部署中`);
+    if (voteCount.buy    > 0) voteParts.push(`賛成${voteCount.buy}`);
+    if (voteCount.wait   > 0) voteParts.push(`様子見${voteCount.wait}`);
+    if (voteCount.defend > 0) voteParts.push(`反対${voteCount.defend}`);
   }
+
+  const lines = [
+    `シグナル：${signalLabel}`,
+    `対象：${assetName}`,
+    `金額：${finalAmt > 0 ? `¥${finalAmt.toLocaleString()}` : 'なし'}`,
+    `部署判断：${voteParts.length > 0 ? voteParts.join(' ') : 'データなし'}`,
+  ];
 
   const block = lines.join('\n') + '\n\n';
 
@@ -1321,8 +1318,12 @@ async function publish(date) {
   note = note.replace(/^📅[^\n]*\n?/gm, '');
   note = note.replace(/^⚠️ 市場フェーズ：[^\n]*\n?/gm, '');
   // ⑮（結論ブロック挿入）より前に除去する必要がある行（後で結論ブロックが再注入する）
-  note = note.replace(/^対象銘柄[：:][^\n]*\n?/gm, '');  // ⑮で再注入されるため先に除去
-  note = note.replace(/^シグナル[：:][^\n]*\n?/gm, '');   // ⑮の結論ブロックに含まれない
+  note = note.replace(/^対象銘柄[：:][^\n]*\n?/gm, '');  // ⑭で再注入されるため先に除去
+  note = note.replace(/^対象[：:][^\n]*\n?/gm, '');       // ⑭で再注入されるため先に除去
+  note = note.replace(/^シグナル[：:][^\n]*\n?/gm, '');   // ⑭で再注入されるため先に除去
+  note = note.replace(/^金額[：:][^\n]*\n?/gm, '');       // ⑭で再注入されるため先に除去
+  note = note.replace(/^根拠[：:][^\n]*\n?/gm, '');       // LLMが最終判断内に書いた冗長行を除去
+  note = note.replace(/^部署判断[：:][^\n]*\n?/gm, '');   // ⑭で再注入されるため先に除去
 
   // 後処理⑧c: LLM生成の 🆔 行を除去（記事番号・task-id の誤記フォーマット）
   // 📋 AC-YYYY-NNNN は ⑨ で機械挿入するため、LLM が 🆔 で書いた版はすべて除去する
@@ -1454,12 +1455,8 @@ async function publish(date) {
   // 後処理㉓: 観測ポジション係数算出行を除去（LLMが生成した場合も除去）
   note = note.replace(/^投資額算出：[^\n]*\n?/gm, '');
 
-  // 後処理㉓b: 最終判断内の冗長行を除去（🟢🎯💴🤖 ブロックと重複するLLM生成物）
-  // シグナル/対象銘柄 は ⑧ で除去済み。ここでは金額・根拠・マーカーを除去
-  // [：:] で全角/半角コロン両対応
-  note = note.replace(/^金額[：:][^\n]*\n?/gm, '');
-  note = note.replace(/^根拠[：:][^\n]*\n?/gm, '');
-  note = note.replace(/（🟢🎯💴🤖）\n?/g, '');           // LLMが書いた説明マーカー除去
+  // 後処理㉓b: 最終判断内の冗長マーカーを除去（シグナル/対象/金額/根拠/部署判断 は ⑧ で除去済み）
+  note = note.replace(/（?🟢🎯💴🤖）?\n?/g, '');           // 旧絵文字マーカーの残骸を除去（安全網）
   // 相沢レイ補足プレフィックスを除去（複数パターン・全角/半角両対応）
   note = note.replace(/^相沢レイ(?:による補足|の補足コメント|の補足)[：:]\s*/gm, '');
   // 買付候補②③のプレースホルダー行を除去（LLMが候補なしの場合に書くゴミ行）
