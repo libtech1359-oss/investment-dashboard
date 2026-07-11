@@ -1361,6 +1361,9 @@ async function publish(date) {
   // ⑨ の includes(articleNum) チェックが機能するよう、先に全除去してから再挿入させる
   note = note.replace(/^📋[^\n]*\n?/gm, '');
 
+  // 後処理⑧e: タイトル行（H1）に日付を追記（note.comのタイトル欄はこの行から抽出されるため反映される）
+  note = note.replace(/^(# 📊[^\n]*?)(?:\s+\d{4}-\d{2}-\d{2})?$/m, `$1　${date}`);
+
   // 後処理⑨: 記事番号をタイトル直後に挿入（AC-YYYY-NNNN）
   if (!note.includes(articleNum)) {
     note = note.replace(/^(# 📊[^\n]*\n)/, `$1\n📋 ${articleNum}\n`);
