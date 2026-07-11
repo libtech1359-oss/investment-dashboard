@@ -1,0 +1,7 @@
+.env
+.env.deployment
+google-credentials.json
+node_modules/
+data/*.jsonl
+data/*.json
+*.pid

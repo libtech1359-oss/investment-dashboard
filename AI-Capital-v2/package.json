@@ -1,0 +1,19 @@
+{
+  "name": "ai-capital-v2",
+  "version": "2.0.0",
+  "description": "AI Capital v2 — Googleスプレッドシート統合データ基盤（GAS経由）",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "register": "node register.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.2.1",
+    "ollama": "^0.6.3",
+    "playwright": "^1.61.0",
+    "undici": "^7.0.0"
+  }
+}
