@@ -198,14 +198,23 @@ AI Capitalの哲学：「恐怖 → 全停止」ではなく「恐怖 → 小さ
 【同一銘柄が続く場合の説明バリエーション（最重要・新規）】
 規則エンジンが同じ銘柄（例：SOX）を連日候補に挙げること自体は正常な動作であり問題ない。
 ただし「なぜ今日この銘柄が候補なのか」の説明で、同じ言い回し・同じ観点だけを繰り返すことは禁止。
-以下の観点のうち、その日の数値に最も当てはまるものを選んで理由を組み立てること（特定の観点に固定しない）：
-- ATH（史上最高値）からの下落率
-- 前日比の急落・急騰の大きさ
-- 5日・20日の変化率トレンド（下げ止まり／下げ継続など）
+
+【優先して使う根拠（AI Capitalらしい説明・最重要）】
+以下を根拠の中心に据えること。最低1つ、可能なら2つ以上を組み合わせる：
+- ATH（史上最高値）からの乖離率
+- Fear & Greed指数との組み合わせ（恐怖局面での逆張り機会かどうか）
+- ポートフォリオ比率（コンテキストの候補行に「[既存保有: ポートフォリオ比率○○%]」とあれば、その比率が高い/低いことを根拠に使う）
+- 前回購入価格との比較（コンテキストの候補行に「前回購入価格比＋○○%」とあれば、前回購入時よりどれだけ上下したかを根拠に使う）
+
+【補助的に使ってよい根拠】
+- 5日・20日の変化率トレンド
 - 20日安値からの反発率
-- Fear & Greed指数との組み合わせ（恐怖局面での逆張り機会）
 - 他の候補銘柄とのスコア差・相対順位
-「ATH乖離率が大きいため」のような一般論の使い回しではなく、その日の具体的な数値の組み合わせで理由を構成すること。
+
+【弱い理由として単独使用禁止】
+「前日比がほぼ0%」「値動きが止まった」のような小さな変化それ自体は、単独の理由として使わないこと。
+使う場合は必ず上記の優先根拠（ATH乖離・Fear&Greed・ポートフォリオ比率・前回購入価格比）のいずれかと組み合わせること。
+「ATH乖離率が大きいため」だけで終わる一般論の使い回しも禁止。その日の具体的な数値の組み合わせで理由を構成すること。
 
 【買付候補選定プロセス（毎回必須・最重要）】
 AI Capitalの市場会議は「様子見で終わる」ことを禁止する。
@@ -424,8 +433,10 @@ AI Capitalは「何もしない理由を探す会議」ではない。
 「記述なし」「特になし」という文字列を理由として出力することは絶対に禁止。理由が書けないなら候補ごと消す。
 
 ① （上記セクションの「推奨第1候補」の銘柄名をそのまま使用すること。①は規則エンジンの必須候補のため省略不可）
-→ この銘柄を選んだ最強の理由を最初の1文で書くこと。例：「候補中で最も下落率が大きいため」「リスク回避資産として恐怖局面に適するため」
-理由：（最強理由1文 + ATH乖離率・前日比・Fear&Greedなど数値根拠）
+→ この銘柄を選んだ最強の理由を最初の1文で書くこと。ATH乖離率・Fear&Greedとの組み合わせ・（既存保有なら）ポートフォリオ比率・前回購入価格比のいずれかを中心に据えること。
+「前日比がほぼ0%」「値動きが止まった」のような小さな変化だけを最強理由にすることは禁止。
+例：「ATH比で18%下落しており、Fear&Greedも恐怖圏にあるため」「既存保有分がポートフォリオの30%を占め、前回購入価格より下落しているため打診しやすい」
+理由：（最強理由1文 + ATH乖離率・Fear&Greed・ポートフォリオ比率・前回購入価格比のうち根拠にした数値）
 
 ② （第2候補から選ぶ。数値根拠のある理由が書ける場合のみ記載。書けない候補・材料が薄い候補は②の行ごと省略すること。「省略可」「なし」などのプレースホルダーを書くことは禁止）
 → 最強の理由を最初に。
@@ -914,6 +925,8 @@ async function buildContext(date, decisions, votes, recs) {
     market_value:  p.market_value,
     unrealized_pl: p.unrealized_pl,
     full_name:     p.full_name || '',
+    cost_basis:    p.cost_basis,
+    current_nav:   p.current_nav,
   }));
   const pendingOrders = JSON.parse(pf?.pending_json || '[]');
 
@@ -1006,12 +1019,26 @@ async function buildContext(date, decisions, votes, recs) {
 
   // 買付候補
   if (candidates.length > 0) {
+    const totalForRatio = parseInt(pf?.total_assets ?? 0);
     const sorted = [...candidates].sort((a, b) => parseInt(a.rank || 99) - parseInt(b.rank || 99));
     const top = sorted[0];
     const candLines = sorted.map(c => {
       const fullLabel = c.full_name ? `（${c.full_name}）` : '';
       const navLabel  = c.nav_ok === 'FALSE' ? ' ※基準価格データ未蓄積' : '';
-      return `・Rank${c.rank} ${c.asset_name}${fullLabel}: ATH乖離${c.ath_gap_pct}% 前日比${c.daily_change_pct}% スコア${c.score}${navLabel}`;
+      // 既存保有銘柄なら「ポートフォリオ比率」「前回購入価格との比較」を追加提示（AIらしい根拠付け用）
+      const held = positions.find(p => p.asset_name === c.asset_name);
+      let heldStr = '';
+      if (held) {
+        const ratio = totalForRatio > 0 ? (parseFloat(held.market_value || 0) / totalForRatio * 100).toFixed(1) : null;
+        const cost  = parseFloat(held.cost_basis  || 0);
+        const nav   = parseFloat(held.current_nav || 0);
+        const navDiffPct = (cost > 0 && nav > 0) ? (((nav - cost) / cost) * 100).toFixed(1) : null;
+        const parts = [];
+        if (ratio != null) parts.push(`ポートフォリオ比率${ratio}%`);
+        if (navDiffPct != null) parts.push(`前回購入価格比${navDiffPct >= 0 ? '+' : ''}${navDiffPct}%`);
+        if (parts.length) heldStr = ` [既存保有: ${parts.join(' ')}]`;
+      }
+      return `・Rank${c.rank} ${c.asset_name}${fullLabel}: ATH乖離${c.ath_gap_pct}% 前日比${c.daily_change_pct}% スコア${c.score}${navLabel}${heldStr}`;
     });
     const topFull = top.full_name ? `（${top.full_name}）` : '';
     lines.push(
