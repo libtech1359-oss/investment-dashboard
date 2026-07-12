@@ -967,8 +967,8 @@ function buildConclusionBlock(decision, mktData, candidates, votes, articleNum, 
 async function buildContext(date, decisions, votes, recs) {
   // positions/pending は portfolio_status.{positions,pending}_json から取得（Single Source of Truth）
   const [mkt, pf, candidates] = await Promise.all([
-    sheets.getLatestRow('market_data').catch(() => null),
-    sheets.getLatestRow('portfolio_status').catch(() => null),
+    sheets.getLatestRowAsOf('market_data', date).catch(() => null),
+    sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
     sheets.getRowsByDate('candidate_assets', date).catch(() => []),
   ]);
   // mkt/pf を後続の算出根拠ブロックでも使うため冒頭で宣言
@@ -1184,7 +1184,7 @@ async function buildContext(date, decisions, votes, recs) {
 async function getArticleNumber(date) {
   const year = date.slice(0, 4);
   const rows = await sheets.getRows('article_decisions').catch(() => []);
-  const count = rows.filter(r => r.date && String(r.date).startsWith(year)).length;
+  const count = rows.filter(r => r.date && String(r.date).startsWith(year) && r.date <= date).length;
   return `AC-${year}-${String(count).padStart(4, '0')}`;
 }
 
@@ -1195,7 +1195,7 @@ async function publish(date) {
   pruneOldImages();
 
   // ── portfolio_status 整合性チェック（cash + pending + invested === total_assets）
-  const pfCheck = await sheets.getLatestRow('portfolio_status').catch(() => null);
+  const pfCheck = await sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null);
   if (pfCheck) {
     const t   = parseInt(pfCheck.total_assets || 0);
     const c   = parseInt(pfCheck.cash         || 0);
@@ -1371,7 +1371,7 @@ async function publish(date) {
 
   // 後処理⑨a: 📊 Market Check ブロックを 📋 番号直後に機械挿入
   {
-    const mktForCheck = await sheets.getLatestRow('market_data').catch(() => null);
+    const mktForCheck = await sheets.getLatestRowAsOf('market_data', date).catch(() => null);
     if (mktForCheck && note.includes('📋')) {
       const checkBlock = buildMarketCheckBlock(mktForCheck);
       note = note.replace(/(📋 [^\n]+\n)/, `$1\n${checkBlock}\n`);
@@ -1404,7 +1404,7 @@ async function publish(date) {
   note = note.replace(/^(#{1,3} [^\n]+)\n(?=[^\n])/gm, '$1\n\n');
 
   // 後処理⑭: ⚖️ 最終判断セクションに 🟢🎯💴🤖 ブロック挿入
-  const pfForSummary  = await sheets.getLatestRow('portfolio_status').catch(() => null);
+  const pfForSummary  = await sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null);
   const pendingForSum = JSON.parse(pfForSummary?.pending_json || '[]');
   let decision        = decisions[0] ?? null;
   if (!decision && pendingForSum.length > 0) {
@@ -1426,7 +1426,7 @@ async function publish(date) {
   note = injectRecommendationSummary(note, recsForSum, decision, pfForSummary);
 
   // 後処理⑮: 記事冒頭に結論ブロックを挿入（最初の ## 見出し直前）
-  const mktLatest   = await sheets.getLatestRow('market_data').catch(() => null);
+  const mktLatest   = await sheets.getLatestRowAsOf('market_data', date).catch(() => null);
   const conclusionBlock = buildConclusionBlock(decision, mktLatest, candidates, votes, articleNum, date);
   if (conclusionBlock) {
     const firstSection = note.search(/^## /m);
@@ -1469,7 +1469,7 @@ async function publish(date) {
   // 後処理㉒a: 👀 次回の注目点 を機械生成で完全置換
   // LLMは現在値ですでに成立している条件を書く誤りを犯すため、常に機械注入する
   {
-    const mktForWatch = await sheets.getLatestRow('market_data').catch(() => null);
+    const mktForWatch = await sheets.getLatestRowAsOf('market_data', date).catch(() => null);
     if (mktForWatch) {
       const watchBlock = buildWatchPoints(mktForWatch);
       // 👀 次回の注目点 〜 👑 秘書室長所見 の手前まで（または文末まで）を置換
@@ -1538,7 +1538,7 @@ async function publish(date) {
   console.log(`[publisher] 記事生成完了 (note: ${note.length}字)`);
 
   // チャート生成（失敗しても続行）
-  const pf = await sheets.getLatestRow('portfolio_status').catch(() => null);
+  const pf = await sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null);
   let chartPath = null, historyChartPath = null, thumbPath = null;
 
   try {
@@ -1549,7 +1549,8 @@ async function publish(date) {
   } catch (e) { console.warn(`[publisher] 円グラフ生成失敗: ${e.message}`); }
 
   try {
-    const pfHistory = await sheets.getRows('portfolio_status').catch(() => []);
+    const pfHistoryAll = await sheets.getRows('portfolio_status').catch(() => []);
+    const pfHistory = pfHistoryAll.filter(r => (r.date || r.timestamp || '').slice(0, 10) <= date);
     historyChartPath = await generateFundHistoryChart(pfHistory, date);
     console.log(`[publisher] 面グラフ: ${historyChartPath ? 'OK' : '失敗'}`);
   } catch (e) { console.warn(`[publisher] 面グラフ生成失敗: ${e.message}`); }

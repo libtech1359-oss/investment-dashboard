@@ -11,10 +11,35 @@ function gasUrl() {
   return url;
 }
 
-function fetchT(url, opts = {}, ms = 30000) {
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(tid));
+// GAS Web App はコールドスタート等で稀にタイムアウト/404を返すため、1回だけ自動リトライする。
+// 2026-07-08 の signalAggregator失敗（Step 3: "This operation was aborted"）・
+// 審査部エラー（GAS POST HTTP 404）はこのタイムアウトが原因だった。
+async function fetchT(url, opts = {}, ms = 30000, retries = 1) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const res = await fetch(url, { ...opts, signal: ctrl.signal });
+      clearTimeout(tid);
+      if (!res.ok && attempt < retries) {
+        console.warn(`[sheets] HTTP ${res.status} → ${attempt + 1}/${retries}回目のリトライ`);
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      clearTimeout(tid);
+      lastErr = err;
+      if (attempt < retries) {
+        console.warn(`[sheets] ${err.message} → ${attempt + 1}/${retries}回目のリトライ`);
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // ── 全行取得 ─────────────────────────────────────────────────
@@ -53,6 +78,15 @@ async function getLatestRow(sheetName) {
   return data ?? null;
 }
 
+// ── 指定日時点での最新1行（date <= 指定日のうち末尾） ─────────
+// 過去日の記事を再生成する際、getLatestRow()だと常に「今の最新」を
+// 返してしまうため、その日の状態を復元するために使う。
+async function getLatestRowAsOf(sheetName, date) {
+  const rows = await getRows(sheetName);
+  const filtered = rows.filter(r => (r.date || r.timestamp || '').slice(0, 10) <= date);
+  return filtered.length > 0 ? filtered[filtered.length - 1] : null;
+}
+
 // ── POST 共通 ─────────────────────────────────────────────
 async function post(body, ms = 15000) {
   const res = await fetchT(gasUrl(), {
@@ -84,4 +118,4 @@ async function replaceSheet(sheetName, headers, rows) {
   }
 }
 
-module.exports = { getRows, getRowsByDate, getRowsByDateRange, getLatestRow, appendRow, upsertRow, replaceSheet, post };
+module.exports = { getRows, getRowsByDate, getRowsByDateRange, getLatestRow, getLatestRowAsOf, appendRow, upsertRow, replaceSheet, post };
