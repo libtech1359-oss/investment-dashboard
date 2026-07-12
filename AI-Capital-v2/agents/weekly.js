@@ -1,81 +1,92 @@
 'use strict';
 
 /**
- * weekly.js — 週刊記事エージェント
+ * weekly.js — 週刊記事エージェント（V1）
  *
- * 現時点の実装範囲:
- *   - データ取得・集計（全シート横断）
- *   - 記事テンプレート組み立て（機械生成セクション）
- *   - LLMコメントセクションはスタブ（TODO マーク付き）
+ * 日刊記事の単純な集約ではなく、「AI Capitalが1週間をどう分析し、
+ * どう判断し、何を学んだか」を伝える記事を組み立てる。
  *
- * 未実装（将来: データ蓄積後に追加）:
- *   - 部署別勝率・的中率
- *   - MVP部署ランキング
- *   - 資産推移グラフ
- *   - note.com への自動保存・定期実行
+ * 構成（V1.4・14セクション）:
+ *   ① 今週の総括（LLM・30秒で伝わる文章）
+ *   ② 今週のトピック（機械生成・3〜5項目）
+ *   ③ 今週のマーケット振り返り（機械生成 + 推移チャート）
+ *   ④ AI Capitalの行動履歴（機械生成）
+ *   ⑤ 部署別レビュー（LLM: 部署ごとに1回・個性が伝わる一言つき）
+ *   ⑥ 今週の判断ハイライト（LLM・対立から結論までのストーリー）
+ *   ⑦ ポートフォリオ変化（機械生成・前週比較）
+ *   ⑧ AIが学んだこと（LLM・今週の議論から得た判断基準/改善点）
+ *   ⑨ 来週の注目条件（機械生成）
+ *   ⑩ 秘書室長週報（LLM: 相沢レイ・振り返り＋組織方針としての展望）
+ *   ⑪ 今週のAI社員MVP（LLM・選出理由＋今週の貢献）
+ *   ⑫ 今週の一言（名言）（LLM・発言者/発言内容/一言解説の3行、担当は毎週変動）
+ *   ⑬ 来週のAI Capital会議テーマ（LLM）
+ *   ⑭ 次号予告（LLM・読者向けteaser）
+ *
+ * サムネイル: 日刊用と異なり、固定ファイル data/weekly_assets/週刊サムネ.png を使用する。
  *
  * 手動実行: node _run_weekly.js YYYY-MM-DD YYYY-MM-DD
  */
 
-const sheets = require('../lib/sheets');
+const sheets  = require('../lib/sheets');
+const { ask } = require('../lib/ollama');
 
 // ── 定数 ─────────────────────────────────────────────────────
 
 const INITIAL_ASSETS = 10_000_000;
+
+const DEPT_DISPLAY = {
+  market:    { name: '神谷シン',   dept: 'マーケット分析部',     emoji: '📈' },
+  risk:      { name: '黒崎ミサキ', dept: 'リスク管理部',         emoji: '🛡️' },
+  portfolio: { name: '橘アオイ',   dept: 'ポートフォリオ管理部', emoji: '💼' },
+  audit:     { name: '鬼塚ガイ',   dept: '審査部',               emoji: '🔍' },
+};
+
+// agent_votes/agent_recommendations の department 表記 → 内部キー
+const DEPT_KEY_BY_LABEL = {
+  'マーケット分析部':     'market',
+  'リスク管理部':         'risk',
+  'ポートフォリオ管理部': 'portfolio',
+  '審査部':               'audit',
+};
+
+const SIGNAL_WEIGHT = { BUY: 2, ACCUMULATE: 1, WAIT: 0, DEFEND: -1, SELL: -2 };
 
 // ── Week ID ───────────────────────────────────────────────────
 
 /**
  * ISO 8601 週番号から week_id を生成する
  * 例: '2026-06-26' → '2026-W26'
- * @param {string} dateStr - YYYY-MM-DD
- * @returns {string} 'YYYY-Www'
  */
 function weekId(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
-  // 最も近い木曜日を基準にする（ISO 8601 準拠）
   date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
   const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
   const week = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
   return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
-/**
- * 週刊記事の管理メタデータを返す
- * status: 'draft' | 'reviewed' | 'published'
- * 現時点では draft のみ使用
- * @param {string} startDate - YYYY-MM-DD
- * @param {string} endDate   - YYYY-MM-DD
- * @returns {object}
- */
 function buildWeeklyMeta(startDate, endDate) {
   return {
     week_id:      weekId(startDate),
     start_date:   startDate,
     end_date:     endDate,
     status:       'draft',
-    generated_at: null,  // 将来: 生成完了時に ISO 8601 タイムスタンプを設定
-    published_at: null,  // 将来: note.com 公開後に設定
+    generated_at: null,
+    published_at: null,
   };
 }
 
-const SIGNAL_WEIGHT = { BUY: 2, ACCUMULATE: 1, WAIT: 0, DEFEND: -1, SELL: -2 };
-
-const DEPT_DISPLAY = {
-  market:    '📈 神谷シン（マーケット分析部）',
-  portfolio: '💼 橘アオイ（ポートフォリオ管理部）',
-  risk:      '🛡️ 黒崎ミサキ（リスク管理部）',
-  audit:     '🔍 鬼塚ガイ（審査部）',
-};
+function dayBefore(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
 
 // ── データ取得 ────────────────────────────────────────────────
 
 /**
  * 指定期間のデータを全シートから収集する
- * @param {string} startDate - YYYY-MM-DD
- * @param {string} endDate   - YYYY-MM-DD
- * @returns {Promise<object>}
  */
 async function gatherWeeklyData(startDate, endDate) {
   const [
@@ -84,32 +95,32 @@ async function gatherWeeklyData(startDate, endDate) {
     recRows,
     decisionRows,
     orderRows,
-    portfolio,
+    pfThisWeek,
+    pfPrevWeek,
     positionRows,
   ] = await Promise.all([
-    sheets.getRowsByDateRange('market_data',           startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('agent_votes',            startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('agent_recommendations',  startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('final_decisions',        startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('orders',                 startDate, endDate).catch(() => []),
-    sheets.getLatestRow('portfolio_status').catch(() => null),
+    sheets.getRowsByDateRange('market_data',          startDate, endDate).catch(() => []),
+    sheets.getRowsByDateRange('agent_votes',           startDate, endDate).catch(() => []),
+    sheets.getRowsByDateRange('agent_recommendations', startDate, endDate).catch(() => []),
+    sheets.getRowsByDateRange('final_decisions',       startDate, endDate).catch(() => []),
+    sheets.getRowsByDateRange('orders',                startDate, endDate).catch(() => []),
+    sheets.getLatestRowAsOf('portfolio_status', endDate).catch(() => null),
+    sheets.getLatestRowAsOf('portfolio_status', dayBefore(startDate)).catch(() => null),
     sheets.getRows('positions').catch(() => []),
   ]);
 
   return {
-    period:          { start: startDate, end: endDate, days: marketRows.length },
-    market:          marketRows,
-    marketSummary:   summarizeMarket(marketRows),
-    decisions:       decisionRows,
-    votesByDept:     aggregateVotesByDept(voteRows),
-    orders:          orderRows,
-    portfolio,
-    positions:       positionRows,
-    recommendations: {
-      assets:  aggregateAssetFreq(recRows),
-      signals: aggregateSignalFreq(decisionRows),
-    },
-    latestMarket:    marketRows[marketRows.length - 1] ?? null,
+    period:        { start: startDate, end: endDate, days: marketRows.length },
+    market:        marketRows.sort((a, b) => (a.date < b.date ? -1 : 1)),
+    marketSummary: summarizeMarket(marketRows),
+    decisions:     decisionRows,
+    orders:        orderRows,
+    votesByDept:   aggregateVotesByDept(voteRows),
+    recsByDept:    aggregateRecsByDept(recRows),
+    portfolio:     pfThisWeek,
+    portfolioPrev: pfPrevWeek,
+    positions:     positionRows,
+    latestMarket:  marketRows[marketRows.length - 1] ?? null,
   };
 }
 
@@ -125,303 +136,579 @@ function summarizeMarket(rows) {
     fear_greed: stat(pick('fear_greed')),
     vix:        stat(pick('vix')),
     usdjpy:     stat(pick('usdjpy')),
+    sp500:      stat(pick('sp500')),
     nasdaq100:  stat(pick('nasdaq100')),
   };
 }
 
 function aggregateVotesByDept(voteRows) {
   const result = {};
-  for (const dept of Object.keys(DEPT_DISPLAY)) {
-    result[dept] = Object.fromEntries(Object.keys(SIGNAL_WEIGHT).map(s => [s, 0]));
+  for (const key of Object.keys(DEPT_DISPLAY)) {
+    result[key] = Object.fromEntries(Object.keys(SIGNAL_WEIGHT).map(s => [s, 0]));
   }
   for (const row of voteRows) {
-    const dept   = row.department;
+    const key    = DEPT_KEY_BY_LABEL[row.department];
     const signal = (row.signal || '').toUpperCase();
-    if (result[dept] && signal in result[dept]) result[dept][signal]++;
+    if (key && result[key] && signal in result[key]) result[key][signal]++;
   }
   return result;
 }
 
-function aggregateAssetFreq(recRows) {
-  const freq = {};
+function aggregateRecsByDept(recRows) {
+  const result = {};
+  for (const key of Object.keys(DEPT_DISPLAY)) result[key] = [];
   for (const row of recRows) {
-    if (!row.asset_id || (row.signal || row.recommendation_type || '').toUpperCase() === 'WAIT') continue;
-    const key = row.asset_id || row.asset_name;
+    const key = DEPT_KEY_BY_LABEL[row.department];
     if (!key) continue;
-    freq[key] = (freq[key] || 0) + 1;
+    result[key].push({
+      date:   row.date,
+      type:   row.recommendation_type || row.action || '',
+      asset:  row.asset_name || 'なし',
+      amount: parseInt(row.amount || 0),
+      reason: row.reason_summary || '',
+    });
   }
-  return Object.entries(freq).sort((a, b) => b[1] - a[1]);
+  return result;
 }
 
-function aggregateSignalFreq(decisionRows) {
-  const freq = {};
-  for (const row of decisionRows) {
-    const s = (row.final_signal || 'UNKNOWN').toUpperCase();
-    freq[s] = (freq[s] || 0) + 1;
+// ── ①今週の総括（LLM・30秒で伝わる文章） ─────────────────────
+
+const WEEKLY_SUMMARY_SYSTEM = `あなたはAI Capital運用チーム全体を俯瞰する立場から、週刊レポートの書き出しを書きます。
+「今週どのような1週間だったのか」が読者に30秒で伝わるよう、3〜4文の自然な文章でまとめてください。
+・今週の市場評価
+・AI Capitalの行動概要
+・今週の結論
+の3要素を、箇条書きではなく1つの流れる文章として織り込むこと。
+与えられたデータのみを根拠にし、新しい数値を創作しないこと。数値を羅列するだけの文にしないこと。`;
+
+async function buildSummary(data) {
+  const ctx = weekContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_SUMMARY_SYSTEM, ctx, { num_predict: 300, temperature: 0.6 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
   }
-  return freq;
+  return [`## ① 今週の総括`, '', body.trim()].join('\n');
 }
 
-// ── セクションビルダー ────────────────────────────────────────
+// ── ②今週のトピック（機械生成） ───────────────────────────────
 
-/** ① 今週の結論（機械生成3行）*/
-function buildConclusion(data) {
-  const { decisions, orders, period, marketSummary } = data;
-  const buyCount  = orders.length;
-  const hasDefend = decisions.some(d => ['DEFEND', 'SELL'].includes((d.final_signal || '').toUpperCase()));
-  const fgAvg     = marketSummary?.fear_greed?.avg;
-  const fgDesc    = fgAvg == null ? '' : fgAvg <= 25 ? '（極端な恐怖圏）' : fgAvg <= 45 ? '（恐怖圏）' : fgAvg <= 55 ? '（中立）' : '（楽観圏）';
+function buildTopics(data) {
+  const { orders, decisions, marketSummary, market } = data;
+  if (!marketSummary) return `## ② 今週のトピック\n\nデータなし`;
 
-  return [
-    `## ① 今週の結論`,
-    '',
-    `・今週（${period.start}〜${period.end}）は${period.days}営業日の記録${fgAvg != null ? `。市場心理平均 Fear & Greed ${fgAvg}${fgDesc}` : ''}`,
-    `・観測ポジション構築 ${buyCount}回${buyCount === 0 ? '（全日見送り）' : ''}`,
-    hasDefend
-      ? '・防御シグナルが発生した局面あり。慎重姿勢を維持'
-      : '・防御シグナルなし。逆張り観測を継続',
-  ].join('\n');
+  const assetCounts = {};
+  for (const o of orders) {
+    const name = o.asset_name || '不明';
+    assetCounts[name] = (assetCounts[name] || 0) + 1;
+  }
+  const topAsset  = Object.entries(assetCounts).sort((a, b) => b[1] - a[1])[0];
+  const waitCount = decisions.filter(d => (d.final_signal || '').toUpperCase() === 'WAIT').length;
+  const fgAvg     = marketSummary.fear_greed?.avg;
+
+  // 今週最大の出来事: Fear&Greedが最も低かった日（恐怖が最も強まった局面）を機械抽出
+  let bigEvent = '特筆すべき急変動なし';
+  if (market.length > 0) {
+    const worst = [...market]
+      .filter(r => !isNaN(parseFloat(r.fear_greed)))
+      .sort((a, b) => parseFloat(a.fear_greed) - parseFloat(b.fear_greed))[0];
+    if (worst) {
+      const d = decisions.find(x => x.date === worst.date);
+      bigEvent = `${worst.date}にFear & Greedが${worst.fear_greed}まで低下${d ? `、AI Capitalは${d.final_signal}と判断` : ''}`;
+    }
+  }
+
+  const items = [
+    topAsset ? `${topAsset[0]}へ${topAsset[1]}回投資` : '今週の投資実行なし',
+    `WAIT判断 ${waitCount}回`,
+    `Fear & Greed平均 ${fgAvg ?? '—'}`,
+    `今週最大の出来事：${bigEvent}`,
+  ];
+
+  return [`## ② 今週のトピック`, '', ...items.map(i => `・${i}`)].join('\n');
 }
 
-/** ② 今週の市場まとめ */
-function buildMarket(data) {
+// ── ③今週のマーケット振り返り（機械生成 + チャート） ───────────
+
+function buildMarketRecap(data) {
   const { marketSummary } = data;
-  if (!marketSummary) return `## ② 今週の市場まとめ\n\nデータなし`;
+  if (!marketSummary) return `## ③ 今週のマーケット振り返り\n\nデータなし`;
 
-  const fmt = stat => stat ? `${stat.min}〜${stat.max}（平均 ${stat.avg}）` : '—';
+  const fmt = (stat, digits = 1) => stat
+    ? `${stat.min.toFixed(digits)} 〜 ${stat.max.toFixed(digits)}（平均 ${stat.avg.toFixed(digits)}）`
+    : '—';
 
   return [
-    `## ② 今週の市場まとめ`,
+    `## ③ 今週のマーケット振り返り`,
     '',
-    `📊 Fear & Greed : ${fmt(marketSummary.fear_greed)}`,
+    `▼HISTORY▼`,
+    '',
+    `📊 Fear & Greed : ${fmt(marketSummary.fear_greed, 0)}`,
     `⚡ VIX          : ${fmt(marketSummary.vix)}`,
-    `💵 USD/JPY      : ${fmt(marketSummary.usdjpy)} 円`,
+    `💵 USD/JPY      : ${fmt(marketSummary.usdjpy, 2)} 円`,
+    `📈 S&P500       : 前日比 ${fmt(marketSummary.sp500)} %`,
     `📈 NASDAQ100    : 前日比 ${fmt(marketSummary.nasdaq100)} %`,
-    '',
-    `※ 推移グラフは将来実装予定`,
   ].join('\n');
 }
 
-/** ③ 部署別判断まとめ */
-function buildVotes(data) {
-  const { votesByDept } = data;
-  const lines = [];
-  for (const [dept, counts] of Object.entries(votesByDept)) {
-    const label   = DEPT_DISPLAY[dept] || dept;
-    const summary = Object.entries(counts)
-      .filter(([, n]) => n > 0)
-      .map(([s, n]) => `${s}:${n}回`)
-      .join(' / ');
-    lines.push(`${label}\n  → ${summary || '記録なし'}`);
-  }
-  return [`## ③ 部署別判断まとめ`, '', ...lines].join('\n');
+// ── ④AI Capitalの行動履歴（機械生成） ───────────────────────
+
+function buildActionHistory(data) {
+  const { decisions, orders, period } = data;
+  if (!decisions.length) return `## ④ AI Capitalの行動履歴\n\n判断記録なし`;
+
+  const sorted = [...decisions].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const rows = sorted.map(d => {
+    const sig  = d.final_signal || '—';
+    const ast  = d.selected_asset || d.target_asset || 'なし';
+    const amt  = parseInt(d.selected_amount || d.amount || 0);
+    return `・${d.date} | ${sig} | ${ast} | ${amt > 0 ? `¥${amt.toLocaleString()}` : '—'}`;
+  });
+
+  const totalBuy  = orders.reduce((s, o) => s + parseInt(o.amount || 0), 0);
+  const buyCount  = sorted.filter(d => ['BUY', 'ACCUMULATE'].includes((d.final_signal || '').toUpperCase())).length;
+  const waitCount = sorted.filter(d => (d.final_signal || '').toUpperCase() === 'WAIT').length;
+
+  return [
+    `## ④ AI Capitalの行動履歴`,
+    '',
+    ...rows,
+    '',
+    `**今週の総投資額**：¥${totalBuy.toLocaleString()}`,
+    `**観測ポジション回数**：${buyCount}回 / ${period.days}営業日`,
+    `**WAIT回数**：${waitCount}回`,
+  ].join('\n');
 }
 
-/** ④ AI Capital 運用状況 */
-function buildPortfolio(data) {
-  const { portfolio, positions } = data;
-  if (!portfolio) return `## ④ AI Capital 運用状況\n\nデータなし`;
+// ── ⑤部署別レビュー（LLM・個性が伝わる内容） ───────────────────
 
-  const total    = parseInt(portfolio.total_assets   || 0);
-  const cash     = parseInt(portfolio.cash           || 0);
-  const pending  = parseInt(portfolio.pending        || 0);
-  const invested = parseInt(portfolio.invested       || 0);
-  const ratio    = portfolio.cash_ratio != null ? `${parseFloat(portfolio.cash_ratio).toFixed(1)}%` : '—';
-  const totalPnl = total - INITIAL_ASSETS;
-  const pnlSign  = totalPnl >= 0 ? '+' : '';
+// 成績表（数値・ランク）ではなく、個性・判断傾向が伝わる一言を添える
+const DEPT_FLAVOR_INSTRUCTION = '\n最後の行に「今週のこの部署らしさ：（一言、20字程度）」を必ず追加すること。' +
+  '数値・スコア・ランク付けではなく、人物像や判断のクセが伝わる言い回しで書くこと。';
+
+const WEEKLY_DEPT_SYSTEM = {
+  market: `あなたは神谷シン、AI Capitalのマーケット分析部長です。
+今週1週間の自分の提案履歴（日付・シグナル・銘柄・根拠）を振り返り、以下2点を簡潔にまとめてください。
+・買い提案の回数とその主な根拠（どの指標を重視したか）
+・今週の相場観に一貫性があったかどうか
+2〜3行、箇条書き。「〜でした」調。新しい数値を創作しないこと、与えられたデータのみ使うこと。` + DEPT_FLAVOR_INSTRUCTION,
+
+  risk: `あなたは黒崎ミサキ、AI Capitalのリスク管理部長です。
+今週1週間の自分の判断履歴を振り返り、以下2点を簡潔にまとめてください。
+・今週最も警戒したポイント（集中投資率・ATH乖離・現金比率など）
+・その警戒は的中したか、杞憂だったか
+2〜3行、箇条書き。数字で殴る口調を維持。与えられたデータのみ使うこと。` + DEPT_FLAVOR_INSTRUCTION,
+
+  portfolio: `あなたは橘アオイ、AI Capitalのポートフォリオ管理部長です。
+今週1週間の自分の提案履歴を振り返り、以下2点を簡潔にまとめてください。
+・今週の平均提案金額とその考え方
+・今週の配分方針（現金比率をどう扱ったか）
+2〜3行、箇条書き。与えられたデータのみ使うこと。` + DEPT_FLAVOR_INSTRUCTION,
+
+  audit: `あなたは鬼塚ガイ、AI Capitalの審査部長です。
+今週1週間、他部署の判断を監査してきた立場から、以下2点を簡潔にまとめてください。
+・今週最も指摘した論点（他部署のロジックのどこを問題視したか）
+・総合して今週の議論の質をどう評価するか
+2〜3行、短い判定文で。与えられたデータのみ使うこと。` + DEPT_FLAVOR_INSTRUCTION,
+};
+
+function deptContextText(key, data) {
+  const recs = data.recsByDept[key] || [];
+  if (recs.length === 0) return '今週の提案記録なし。';
+  return recs.map(r =>
+    `${r.date} | ${r.type} | ${r.asset} | ${r.amount > 0 ? `¥${r.amount.toLocaleString()}` : '—'} | ${r.reason}`
+  ).join('\n');
+}
+
+async function buildDeptReviews(data) {
+  const order = ['market', 'risk', 'portfolio', 'audit'];
+  const lines = [`## ⑤ 部署別レビュー`, ''];
+
+  for (const key of order) {
+    const meta = DEPT_DISPLAY[key];
+    const ctx  = deptContextText(key, data);
+    let comment;
+    try {
+      comment = await ask(WEEKLY_DEPT_SYSTEM[key], ctx, { num_predict: 280, temperature: 0.65 });
+    } catch (e) {
+      comment = `（コメント生成失敗: ${e.message}）`;
+    }
+    // 「今週のこの部署らしさ：」行を抽出し、本文とは別行に整形する
+    const flavorMatch = comment.match(/今週のこの部署らしさ[：:]\s*(.+)/);
+    const flavor   = flavorMatch ? flavorMatch[1].trim() : null;
+    const mainText = comment.replace(/今週のこの部署らしさ[：:].*/s, '').trim();
+
+    lines.push(`${meta.emoji} ${meta.name}（${meta.dept}）`, '', mainText, '');
+    if (flavor) lines.push(`＞ ${flavor}`, '');
+  }
+  return lines.join('\n').trimEnd();
+}
+
+// ── ⑥今週の判断ハイライト（LLM） ─────────────────────────────
+
+const WEEKLY_HIGHLIGHT_SYSTEM = `今週1週間のAI Capitalの判断データを見て、最も印象的だった判断を1〜2件選び、紹介してください。
+観点の例（あくまで例。実際の内容はデータに基づくこと）：
+・最も良かった判断
+・最も難しかった判断（部署間で意見が割れた場面など）
+・WAITが有効だった場面
+・逆張りが機能した場面
+単に結果を述べるのではなく、「どの部署がどう主張し、何が対立し、最終的にどう決着したか」という
+議論の流れ（ストーリー）が伝わるように書くこと。日付を明記し、各判断3〜4行程度。
+与えられたデータのみ使うこと。新しい数値を創作しないこと。`;
+
+async function buildHighlights(data) {
+  const ctx = weekContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_HIGHLIGHT_SYSTEM, ctx, { num_predict: 600, temperature: 0.65 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  return [`## ⑥ 今週の判断ハイライト`, '', body.trim()].join('\n');
+}
+
+// ── ⑦ポートフォリオ変化（機械生成・前週比較） ─────────────────
+
+function buildPortfolioChange(data) {
+  const { portfolio: cur, portfolioPrev: prev } = data;
+  if (!cur) return `## ⑦ ポートフォリオ変化\n\nデータなし`;
+
+  const curTotal = parseInt(cur.total_assets || 0);
+  const curCash  = parseFloat(cur.cash_ratio || 0);
+  const curPl    = parseInt(cur.unrealized_pl || 0);
+  const curPend  = parseInt(cur.pending || 0);
+
+  const prevTotal = prev ? parseInt(prev.total_assets || 0) : INITIAL_ASSETS;
+  const prevCash  = prev ? parseFloat(prev.cash_ratio || 0) : 100.0;
+  const prevPl    = prev ? parseInt(prev.unrealized_pl || 0) : 0;
+
+  const diffTotal = curTotal - prevTotal;
+  const diffCash  = curCash - prevCash;
+  const diffPl    = curPl - prevPl;
+  const sign      = v => (v >= 0 ? '+' : '') + v.toLocaleString();
+
+  const positions   = JSON.parse(cur.positions_json || '[]');
+  const holdRatio   = curTotal > 0 ? (100 - curCash).toFixed(1) : '0.0';
 
   const posLines = positions.length
-    ? positions.map(p => `  ・${p.asset_name ?? p.asset_id} ¥${Number(p.invested_amount || 0).toLocaleString()}`).join('\n')
+    ? positions.map(p => `  ・${p.name}：¥${Number(p.market_value || 0).toLocaleString()}`).join('\n')
     : '  ・なし';
 
   return [
-    `## ④ AI Capital 運用状況`,
+    `## ⑦ ポートフォリオ変化`,
     '',
-    `開始資産  : ¥${INITIAL_ASSETS.toLocaleString()}`,
-    `現在資産  : ¥${total.toLocaleString()}`,
-    `累計損益  : ${pnlSign}¥${totalPnl.toLocaleString()}`,
-    `現金比率  : ${ratio}`,
-    `現金残高  : ¥${cash.toLocaleString()}`,
-    `注文中    : ¥${pending.toLocaleString()}`,
-    `投資中    : ¥${invested.toLocaleString()}`,
-    ``,
-    `保有資産:`,
+    `総資産　：¥${curTotal.toLocaleString()}（前週比 ${sign(diffTotal)}）`,
+    `現金比率：${curCash.toFixed(1)}%（前週比 ${sign(+diffCash.toFixed(1))}pt）`,
+    `保有比率：${holdRatio}%`,
+    `注文中　：¥${curPend.toLocaleString()}`,
+    `含み損益：${curPl >= 0 ? '+' : ''}¥${curPl.toLocaleString()}（前週比 ${sign(diffPl)}）`,
+    '',
+    `保有銘柄:`,
     posLines,
   ].join('\n');
 }
 
-/** ⑤ 今週の売買履歴 */
-function buildOrders(data) {
-  const { orders } = data;
-  if (!orders.length) return `## ⑤ 今週の売買履歴\n\n今週の売買なし`;
+// ── ⑧AIが学んだこと（LLM・判断基準の学習視点） ─────────────────
 
-  const rows = orders.map(o =>
-    `・${o.date} | ${o.asset_name} | ¥${Number(o.amount || 0).toLocaleString()} | ${o.reason_summary || '—'}`
-  );
-  return [`## ⑤ 今週の売買履歴`, '', ...rows].join('\n');
+const WEEKLY_LEARNING_SYSTEM = `あなたはAI Capital運用チーム全体を俯瞰する立場です。
+今週1週間、各部署が議論の中で示した根拠・対立・合意形成を踏まえ、
+「今週の議論からAI Capitalが得た新しい判断基準や改善点」を3〜4点、箇条書きでまとめてください。
+単なる市場解説ではなく、今週のやり取りを通じてAIの判断ロジックがどう変化・洗練されたかという視点で書くこと
+（視点の例：単一指標だけで判断しない／複数指標の組み合わせを重視するようになった／保有比率や集中度を判断材料に加えた、など。ただし例の丸写しは禁止）。
+与えられたデータから読み取れる具体的な傾向のみ書くこと。各項目1行、簡潔に。`;
+
+function weekContextText(data) {
+  const { marketSummary, decisions, orders, votesByDept, recsByDept } = data;
+  const parts = [];
+  if (marketSummary) {
+    parts.push(`Fear&Greed: ${marketSummary.fear_greed?.min}-${marketSummary.fear_greed?.max}(avg ${marketSummary.fear_greed?.avg}) / VIX: ${marketSummary.vix?.min}-${marketSummary.vix?.max}(avg ${marketSummary.vix?.avg})`);
+  }
+  parts.push(`最終判断: ${decisions.map(d => `${d.date}=${d.final_signal}`).join(', ') || 'なし'}`);
+  parts.push(`発注: ${orders.map(o => `${o.date} ${o.asset_name} ¥${o.amount}`).join(', ') || 'なし'}`);
+  for (const [key, meta] of Object.entries(DEPT_DISPLAY)) {
+    const reasons = (recsByDept[key] || []).map(r => r.reason).filter(Boolean);
+    if (reasons.length) parts.push(`${meta.dept}の根拠: ${reasons.join(' / ')}`);
+  }
+  return parts.join('\n');
 }
 
-/**
- * ⑥ AI社員コメント
- * TODO: LLM実装時に各部署ごとに ask() を呼ぶ
- * 引数: weekSummary（データ集計結果を文字列化したもの）
- */
-function buildComments(_data) {
-  // TODO: 実装時は以下を追加
-  //   const summary = buildWeekSummaryText(data);
-  //   const shinComment = await ask(WEEKLY_MARKET_SYSTEM,    summary, { num_predict: 300 });
-  //   const misakiComment = await ask(WEEKLY_RISK_SYSTEM,    summary, { num_predict: 300 });
-  //   const aoiComment = await ask(WEEKLY_PORT_SYSTEM,       summary, { num_predict: 300 });
-  //   const gaiComment = await ask(WEEKLY_AUDIT_SYSTEM,      summary, { num_predict: 300 });
-  //   const reiComment = await ask(WEEKLY_SECRETARY_SYSTEM,  summary, { num_predict: 400 });
-
-  return [
-    `## ⑥ AI社員コメント`,
-    '',
-    `📈 神谷シン（マーケット分析部）`,
-    `（将来実装: 今週の市場分析コメント）`,
-    '',
-    `🛡️ 黒崎ミサキ（リスク管理部）`,
-    `（将来実装: 今週のリスク評価コメント）`,
-    '',
-    `💼 橘アオイ（ポートフォリオ管理部）`,
-    `（将来実装: ポートフォリオ運用コメント）`,
-    '',
-    `🔍 鬼塚ガイ（審査部）`,
-    `（将来実装: 今週の判断審査コメント）`,
-    '',
-    `👑 相沢レイ（秘書室長）`,
-    `（将来実装: 週次総合所見）`,
-  ].join('\n');
+async function buildLearning(data) {
+  const ctx = weekContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_LEARNING_SYSTEM, ctx, { num_predict: 350, temperature: 0.6 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  return [`## ⑧ AIが学んだこと`, '', body.trim()].join('\n');
 }
 
-/** ⑦ AI会社の判断傾向 */
-function buildTrends(data) {
-  const { recommendations } = data;
-  const { assets, signals } = recommendations;
+// ── ⑨来週の注目条件（機械生成） ─────────────────────────────
 
-  const assetLines = assets.length
-    ? assets.slice(0, 5).map(([id, n]) => `  ・${id}: ${n}回推薦`)
-    : ['  ・推薦データなし'];
-
-  const signalLines = Object.keys(signals).length
-    ? Object.entries(signals).map(([s, n]) => `  ・${s}: ${n}回`).join('\n')
-    : '  ・データなし';
-
-  return [
-    `## ⑦ AI会社の判断傾向`,
-    '',
-    `**推薦された銘柄（上位5）:**`,
-    ...assetLines,
-    '',
-    `**最終シグナル内訳:**`,
-    signalLines,
-    '',
-    `（傾向分析コメントは将来実装: LLM生成）`,
-    `（部署別勝率・的中率・ランキングはデータ蓄積後に実装予定）`,
-  ].join('\n');
-}
-
-/** ⑧ 来週の注目条件（最新市場データから機械生成）*/
 function buildWatchPoints(data) {
   const mkt = data.latestMarket;
-  if (!mkt) return `## ⑧ 来週の注目条件\n\nデータなし`;
+  if (!mkt) return `## ⑨ 来週の注目条件\n\nデータなし`;
 
   const fg   = parseFloat(mkt.fear_greed ?? 50);
   const vix  = parseFloat(mkt.vix ?? 15);
   const n100 = parseFloat(mkt.nasdaq100 ?? 0);
   const points = [];
 
-  // Fear & Greed
-  if (fg <= 25) {
-    points.push(`Fear & Greed ${Math.max(5, Math.round(fg - 8))}以下 → 恐怖深化、観測ポジション追加を検討`);
-    points.push(`Fear & Greed ${Math.round(Math.ceil((fg + 12) / 5) * 5)}以上 → 恐怖圏緩和を確認、戦略を再評価`);
-  } else if (fg <= 45) {
-    points.push(`Fear & Greed ${Math.round(fg - 10)}以下 → 恐怖圏入り、警戒水準に移行`);
-    points.push(`Fear & Greed ${Math.round(Math.ceil((fg + 8) / 5) * 5)}以上 → 中立圏回復、積み増しを検討`);
-  } else if (fg <= 55) {
-    points.push(`Fear & Greed ${Math.round(fg - 8)}以下 → 中立圏から恐怖寄りに転換、観察継続`);
-    points.push(`Fear & Greed ${Math.round(Math.ceil((fg + 10) / 5) * 5)}以上 → 楽観圏入り、過熱に注意`);
-  } else {
-    points.push(`Fear & Greed ${Math.round(fg - 10)}以下 → 楽観圏から後退、利確・慎重化を検討`);
-  }
+  if (fg <= 25)      points.push(`Fear & Greed：${Math.max(5, Math.round(fg - 8))}以下で恐怖深化、${Math.round(fg + 12)}以上で緩和`);
+  else if (fg <= 45)  points.push(`Fear & Greed：${Math.round(fg - 10)}以下で警戒、${Math.round(fg + 8)}以上で中立回復`);
+  else if (fg <= 55)  points.push(`Fear & Greed：${Math.round(fg - 8)}以下で恐怖寄り転換に注意`);
+  else                points.push(`Fear & Greed：${Math.round(fg - 10)}以下で楽観後退、利確・慎重化を検討`);
 
-  // VIX
-  if (vix < 15) {
-    points.push(`VIX ${Math.ceil(vix + 4)}超え → 低ボラから上昇転換、ポジション構築ペースを緩める`);
-  } else if (vix < 20) {
-    const warn = Math.round(Math.ceil(vix) + 3);
-    points.push(`VIX ${warn}超え → 警戒水準入り、ポジション構築を一時保留`);
-  } else if (vix < 25) {
-    points.push(`VIX ${Math.round(vix - 3)}以下 → 緊張緩和シグナル、観測再開を判断`);
-  } else {
-    points.push(`VIX ${Math.round(vix - 5)}以下 → 高ボラ脱出、段階的な観測再開を検討`);
-  }
+  if (vix < 15)       points.push(`VIX：${Math.ceil(vix + 4)}超えで警戒水準入り`);
+  else if (vix < 25)  points.push(`VIX：${Math.round(vix - 3)}以下で緊張緩和`);
+  else                points.push(`VIX：${Math.round(vix - 5)}以下で高ボラ脱出を確認`);
 
-  // NASDAQ100
-  if (n100 >= 1) {
-    points.push(`NASDAQ100 前日比 -0.5%以下 → 上昇一服、利確タイミングを確認`);
-  } else if (n100 >= -1) {
-    points.push(`NASDAQ100 前日比 +1%以上 → 反転シグナル、ポジション継続を判断`);
-    points.push(`NASDAQ100 前日比 -1.5%以下 → 下落加速、追加逆張り機会を評価`);
-  } else {
-    const deeper    = Math.floor(n100 * 2) / 2 - 0.5;
-    const deeperStr = deeper % 1 === 0 ? deeper.toFixed(0) : deeper.toFixed(1);
-    points.push(`NASDAQ100 前日比 ${deeperStr}%以下 → 下落加速、さらなる逆張り機会を評価`);
-    points.push(`NASDAQ100 前日比 +1%以上 → 反転シグナル、ポジション継続を判断`);
-  }
+  points.push(`主要指数（S&P500・NASDAQ100）の反発・続落動向`);
+  points.push(`ATH乖離率の拡大・縮小（候補銘柄のエントリータイミング）`);
+  points.push(`ドル円の水準（保有資産の実質価値への影響）`);
 
-  return [`## ⑧ 来週の注目条件`, '', ...points.map(p => `・${p}`)].join('\n');
+  return [`## ⑨ 来週の注目条件`, '', ...points.map(p => `・${p}`)].join('\n');
 }
 
-/**
- * ⑨ 秘書室長総括
- * TODO: LLM実装時に ask() を呼ぶ
- * 内容: AI会社として今週何を学んだか。単なる市場解説ではなく経営週報として。
- */
-function buildClosing(_data) {
-  // TODO: 実装時は以下を追加
-  //   const summary = buildWeekSummaryText(data);
-  //   return await ask(WEEKLY_CLOSING_SYSTEM, summary, { num_predict: 600, temperature: 0.7 });
+// ── ⑩秘書室長週報（LLM） ─────────────────────────────────────
+
+const WEEKLY_SECRETARY_SYSTEM = `あなたは相沢レイ、AI Capitalの秘書室長です。あなた自身は投資判断を行う立場ではありません。
+今週1週間の会議・議論全体を振り返り、記事全体を締めくくる経営総括を書いてください。読み終えた読者が
+「来週も見たい」と思えるような、締まりのある文章を目指すこと。
+前半（振り返り）では以下を扱うこと：
+・今週の議論で何が話し合われたか
+・部署間で意見が分かれた点（データにその形跡があれば具体的に）
+・最終判断に至った経緯、会議全体の雰囲気（緊張感があった／落ち着いていた、など）
+後半（締め）では、来週へ向けた展望と、AI Capital全体としての方針を明確に打ち出すこと。
+ただし「SOXを買うべき」のような具体的な投資方針・銘柄への言及は禁止。
+「部署間の連携をより深めたい」「リスク許容度の判断基準を精緻化したい」のような、
+AI Capitalという組織としての運営・議論姿勢に関する方針・展望に留めること。
+地の文で、同じ表現・言い回しの繰り返しは避けること。5〜7行程度。与えられたデータのみを根拠にすること。`;
+
+async function buildSecretaryReport(data) {
+  const ctx = weekContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_SECRETARY_SYSTEM, ctx, { num_predict: 500, temperature: 0.7 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  return [`## ⑩ 秘書室長週報（相沢レイ）`, '', body.trim()].join('\n');
+}
+
+// ── ⑪今週のAI社員MVP（LLM） ───────────────────────────────────
+
+const WEEKLY_MVP_SYSTEM = `今週1週間のAI Capital各部署（神谷シン=マーケット分析部／黒崎ミサキ=リスク管理部／橘アオイ=ポートフォリオ管理部／鬼塚ガイ=審査部）の活動データを見て、
+最も印象的だった1名を選出してください。
+出力形式（厳守）：
+MVP：（氏名）（部署）
+理由：（1文、選出理由）
+貢献：（2〜3文で、そのAI社員が今週どのように議論へ貢献したかを具体的に。単なる理由の繰り返しではなく、
+　　　どんな場面でどう発言・提案し、議論の流れにどう影響したかを描写すること）
+上記3行以外の文章・前置き・見出しは出力しないこと。`;
+
+async function buildMvp(data) {
+  const ctx = weekContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_MVP_SYSTEM, ctx, { num_predict: 400, temperature: 0.65 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  // LLMが前置き・指示文をそのまま出力に混ぜることがあるため、"MVP" 以降だけを抽出する
+  const idx = body.indexOf('MVP');
+  let cleaned = (idx >= 0 ? body.slice(idx) : body).trim();
+  cleaned = cleaned.replace(/上記3行以外の文章.*$/s, '').trim();
+  return [`## ⑪ 今週のAI社員MVP`, '', cleaned].join('\n');
+}
+
+// ── ⑫今週の一言（名言）（LLM） ───────────────────────────────
+
+const WEEKLY_QUOTE_SYSTEM = `今週1週間のAI Capital各部署（神谷シン=マーケット分析部／黒崎ミサキ=リスク管理部／橘アオイ=ポートフォリオ管理部／鬼塚ガイ=審査部／相沢レイ=秘書室長）の
+やり取りを踏まえ、今週最も印象に残った発言を1つ選定・創作してください。担当者は毎週変わってよい。
+【重要・厳守】
+・与えられたデータの reason（判断根拠）や議事録の文章をそのまま引用・要約・言い換えしないこと。
+・「〜%が高い」「〜%まで低下」のような数値をそのまま読み上げる発言は禁止。
+・そのキャラクターが今週の出来事を振り返って言いそうな、性格・口調が滲み出るオリジナルの発言を作ること。
+・毎週同じような言い回しにならないよう、今週ならではの出来事（対立した部署、判断の分かれ目など）の
+　"空気感"を踏まえつつ、数値を直接引用しない比喩・言い回しにすること。
+必ず1名分のみ出力すること。複数キャラクター分を書いた場合は不正解とする。
+出力形式（厳守・この3行のみ）：
+発言者：（氏名）（部署）
+発言内容：「（20〜40字程度、そのキャラクターの口調で）」
+一言解説：（なぜこの発言が今週を象徴するのか、事実に基づき1文で）
+それ以外の文章は出力しないこと。`;
+
+async function buildQuote(data) {
+  const ctx = weekContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_QUOTE_SYSTEM, ctx, { num_predict: 280, temperature: 0.85 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  // LLMが複数名分を出力することがあるため、最初の1組（発言者/発言内容/一言解説）だけを取り出す
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
+  const quoteIdx = lines.findIndex(l => /^発言内容[：:]/.test(l));
+  let result = body.trim();
+  if (quoteIdx >= 0) {
+    let speaker = null;
+    for (let i = quoteIdx - 1; i >= 0; i--) {
+      if (lines[i]) { speaker = lines[i].replace(/^発言者[：:]\s*/, ''); break; }
+    }
+    let explanation = null;
+    if (lines[quoteIdx + 1] && /^一言解説[：:]/.test(lines[quoteIdx + 1])) {
+      explanation = lines[quoteIdx + 1];
+    }
+    const parts = [];
+    if (speaker) parts.push(`発言者：${speaker}`);
+    parts.push(lines[quoteIdx]);
+    if (explanation) parts.push(explanation);
+    if (parts.length > 0) result = parts.join('\n');
+  }
+  return [`## ⑫ 今週の一言（名言）`, '', result].join('\n');
+}
+
+// ── ⑬来週のAI Capital会議テーマ（LLM） ───────────────────────
+
+const WEEKLY_NEXT_THEME_SYSTEM = `AI Capitalの現在のポートフォリオ構成・今週の市場環境・今週の議論内容を踏まえ、
+来週のAI Capital会議で議論すべきテーマを1件、疑問形で提案してください。
+例（あくまで形式の例。内容はコピーしないこと）：
+・SOX集中率30%は許容範囲か
+・Fear & Greed30以下で追加投資すべきか
+・ゴールド比率の見直しは必要か
+実際の保有比率・市場水準・今週の対立点など、与えられたデータに基づいた具体的なテーマにすること。
+翌週の議論に直接つながる、答えが1つに決まっていない問いにすること。
+例のように15〜25字程度の短い問いかけにすること（長い説明文にしないこと）。
+出力は「・」で始まる1行のみ。他の文章・前置き・見出しは一切書かないこと。`;
+
+function nextThemeContextText(data) {
+  const pf  = data.portfolio;
+  const mkt = data.latestMarket;
+  const positions = pf ? JSON.parse(pf.positions_json || '[]') : [];
+  const posLine = positions.length
+    ? positions.map(p => `${p.name}:¥${Number(p.market_value || 0).toLocaleString()}`).join(', ')
+    : 'なし';
 
   return [
-    `## ⑨ 秘書室長総括（相沢レイ）`,
-    '',
-    `（将来実装: AI会社として今週何を学んだかを経営週報として文章化）`,
+    `現金比率: ${pf?.cash_ratio ?? '—'}%`,
+    `保有銘柄: ${posLine}`,
+    `直近Fear&Greed: ${mkt?.fear_greed ?? '—'} / VIX: ${mkt?.vix ?? '—'}`,
+    weekContextText(data),
   ].join('\n');
+}
+
+async function buildNextTheme(data) {
+  const ctx = nextThemeContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_NEXT_THEME_SYSTEM, ctx, { num_predict: 150, temperature: 0.75 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  // 前置きが付いた場合の安全網: 「・」で始まる行があればそれを優先する
+  const bulletLine = body.split('\n').map(l => l.trim()).filter(l => l.startsWith('・')).pop();
+  const line = (bulletLine || body.trim().split('\n').filter(Boolean).pop() || body.trim()).replace(/^・/, '');
+  return [`## ⑬ 来週のAI Capital会議テーマ`, '', `・${line}`].join('\n');
+}
+
+// ── ⑭次号予告（LLM） ───────────────────────────────────────
+
+const WEEKLY_PREVIEW_SYSTEM = `AI Capital週刊号の最後に置く「次号予告」を作成してください。
+来週の市場注目点・保有銘柄の状況・今週の議論の流れを踏まえ、
+読者が「来週も読みたい」と思えるteaser（予告）を2〜3項目、箇条書きで作成してください。
+例（形式の参考。内容はそのままコピーしないこと）：
+・Fear & Greedが30を割った場合のAI判断
+・注目銘柄の最新評価
+・来週の会議テーマの結論
+具体的な数値・銘柄名を使い、続きが気になるフックのある文にすること。抽象的な一般論は禁止。
+【重要・厳守】与えられたデータに存在しない数値・日付・曜日・出来事を創作しないこと。
+「〜になった場合」「〜を割ったら」のように仮定・未来の問いかけとして書くのは良いが、
+「今週すでに起きたこと」として事実と異なる内容（数値の向き・時系列など）を書かないこと。
+出力は「・」で始まる箇条書き2〜3行のみ。他の文章・前置き・見出しは一切書かないこと。`;
+
+async function buildPreview(data) {
+  const ctx = nextThemeContextText(data);
+  let body;
+  try {
+    body = await ask(WEEKLY_PREVIEW_SYSTEM, ctx, { num_predict: 250, temperature: 0.75 });
+  } catch (e) {
+    body = `（生成失敗: ${e.message}）`;
+  }
+  const bullets = body.split('\n').map(l => l.trim()).filter(l => l.startsWith('・'));
+  const content = bullets.length > 0 ? bullets.join('\n') : body.trim();
+  return [`## ⑭ 次号予告`, '', '【次号予告】', '', content].join('\n');
+}
+
+// ── note.com向けクリーンアップ ─────────────────────────────────
+
+/**
+ * note.comのエディタはMarkdown記法を解釈しないため、見出し記号・強調記号・
+ * 水平線を除去してプレーンテキストとして読める形に整形する。
+ * (publisher.js の後処理群とは独立した、週刊専用の簡易版)
+ */
+function cleanupForNote(markdown) {
+  let note = markdown;
+  // ▼HISTORY▼ マーカーは除去しない: noteDraft.saveDraft() が画像挿入時に見つけて置き換える
+  note = note.replace(/^#{2,3}[ \t]*/gm, '');
+  note = note.replace(/\*\*(.+?)\*\*/g, '$1');
+  note = note.replace(/^\*[ \t]{1,4}/gm, '・');       // Markdown箇条書き「* 」→「・」
+  note = note.replace(/^---[ \t]*$/gm, '');
+  note = note.replace(/\n{3,}/g, '\n\n');
+  return note.trim();
 }
 
 // ── メイン ──────────────────────────────────────────────────
 
 /**
- * 週刊記事ドラフトを組み立てる
- * LLM呼び出しなし・note保存なし（設計フェーズ）
- * @param {string} startDate - YYYY-MM-DD
- * @param {string} endDate   - YYYY-MM-DD
- * @returns {Promise<string>} note マークダウン
+ * 週刊記事ドラフトを組み立てる（LLM呼び出しあり・note保存なし）
+ * @returns {Promise<{ note: string, meta: object, chartData: Array }>}
  */
 async function buildWeeklyDraft(startDate, endDate) {
   const data = await gatherWeeklyData(startDate, endDate);
   const meta = buildWeeklyMeta(startDate, endDate);
 
   const header = [
-    `# 週刊 AI Capital レポート ${meta.week_id}`,
-    `${startDate}〜${endDate}`,
+    `# 📊 AI Capital 週刊号　${meta.week_id}（${startDate}〜${endDate}）`,
     '',
-    '*AI社員4部署による市場観測の週間まとめです。*',
+    '*AI社員4部署による、1週間の市場観測と判断のまとめです。*',
     '',
   ].join('\n');
 
+  // 機械生成セクション（並列不要・高速）
+  const topics          = buildTopics(data);
+  const marketRecap     = buildMarketRecap(data);
+  const actionHistory   = buildActionHistory(data);
+  const portfolioChange = buildPortfolioChange(data);
+  const watchPoints     = buildWatchPoints(data);
+
+  // LLM生成セクション（順次実行。並列だとローカルLLMに負荷が集中するため）
+  const summary          = await buildSummary(data);
+  const deptReviews      = await buildDeptReviews(data);
+  const highlights       = await buildHighlights(data);
+  const learning         = await buildLearning(data);
+  const secretaryReport  = await buildSecretaryReport(data);
+  const mvp               = await buildMvp(data);
+  const quote             = await buildQuote(data);
+  const nextTheme          = await buildNextTheme(data);
+  const preview            = await buildPreview(data);
+
   const sections = [
-    buildConclusion(data),
-    buildMarket(data),
-    buildVotes(data),
-    buildPortfolio(data),
-    buildOrders(data),
-    buildComments(data),
-    buildTrends(data),
-    buildWatchPoints(data),
-    buildClosing(data),
+    summary,
+    topics,
+    marketRecap,
+    actionHistory,
+    deptReviews,
+    highlights,
+    portfolioChange,
+    learning,
+    watchPoints,
+    secretaryReport,
+    mvp,
+    quote,
+    nextTheme,
+    preview,
   ];
 
   const footer = [
@@ -431,7 +718,50 @@ async function buildWeeklyDraft(startDate, endDate) {
   ].join('\n');
 
   const note = header + sections.join('\n\n') + footer;
-  return { note, meta };
+  return { note, meta, marketRows: data.market };
 }
 
-module.exports = { weekId, buildWeeklyMeta, gatherWeeklyData, buildWeeklyDraft };
+/**
+ * 週刊記事を組み立て、note.comに下書き保存する。
+ * @returns {Promise<{ note: string, meta: object, noteUrl: string|null }>}
+ */
+// 日刊記事はAC番号ごとにサムネイルを動的生成するが、週刊号は固定のこのファイルを常に使う
+const WEEKLY_THUMB_PATH = require('path').join(__dirname, '../data/weekly_assets/週刊サムネ.png');
+
+async function publishWeekly(startDate, endDate) {
+  const chartGen  = require('../lib/chartGenerator');
+  const noteDraft = require('../lib/noteDraft');
+  const fs        = require('fs');
+
+  const { note, meta, marketRows } = await buildWeeklyDraft(startDate, endDate);
+
+  let trendChartPath = null;
+  try {
+    trendChartPath = await chartGen.generateWeeklyTrendChart(marketRows, meta.week_id);
+  } catch (e) {
+    console.warn(`[weekly] 推移チャート生成失敗: ${e.message}`);
+  }
+
+  const cleaned  = cleanupForNote(note);
+  const thumbPath = fs.existsSync(WEEKLY_THUMB_PATH) ? WEEKLY_THUMB_PATH : null;
+  if (!thumbPath) console.warn(`[weekly] 週刊サムネイルが見つかりません: ${WEEKLY_THUMB_PATH}`);
+
+  let noteUrl = null;
+  try {
+    const result = await noteDraft.saveDraft({ body: cleaned, historyChartPath: trendChartPath, thumbPath });
+    noteUrl = result.url;
+  } catch (e) {
+    console.error(`[weekly] note.com 下書き保存失敗: ${e.message}`);
+  }
+
+  return { note: cleaned, meta, noteUrl };
+}
+
+module.exports = {
+  weekId,
+  buildWeeklyMeta,
+  gatherWeeklyData,
+  buildWeeklyDraft,
+  publishWeekly,
+  cleanupForNote,
+};

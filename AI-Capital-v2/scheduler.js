@@ -4,6 +4,7 @@ const cron          = require('node-cron');
 const secretary     = require('./secretary');
 const dataFetcher   = require('./lib/dataFetcher');
 const capitalEvents = require('./lib/capitalEvents');
+const weekly        = require('./agents/weekly');
 
 const { writeLog, writeError } = (() => {
   const log = (tag, msg) => console.log(`[${tag}] ${msg}`);
@@ -27,6 +28,11 @@ const SCHEDULES = [
     name: '月次資金積立（＋ボーナス）',
     cron: '0 9 1 * *',   // 毎月1日 9:00 JST
     type: 'capital',
+  },
+  {
+    name: '週刊 AI Capital レポート',
+    cron: '30 17 * * 5',   // 毎週金曜 17:30 JST（日刊会議の後）
+    type: 'weekly',
   },
 ];
 
@@ -95,12 +101,44 @@ async function executeCapital(schedule) {
   }
 }
 
+function currentWeekMondayFriday() {
+  const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const today    = new Date(`${todayStr}T00:00:00Z`);
+  const dow      = today.getUTCDay();
+  const monday   = new Date(today);
+  monday.setUTCDate(today.getUTCDate() - (dow === 0 ? 6 : dow - 1));
+  const friday   = new Date(monday);
+  friday.setUTCDate(monday.getUTCDate() + 4);
+  const fmt = d => d.toISOString().slice(0, 10);
+  return [fmt(monday), fmt(friday)];
+}
+
+async function executeWeekly(schedule) {
+  try {
+    await notify(`▶ ${schedule.name} 開始`);
+    const [start, end] = currentWeekMondayFriday();
+    const result = await weekly.publishWeekly(start, end);
+    if (result.noteUrl) {
+      await notify(`📄 **週刊レポート下書き保存完了** (${start}〜${end})\n${result.noteUrl}`);
+    } else {
+      await notify(`⚠️ ${schedule.name}: note.com 下書き保存に失敗しました（本文は生成済み）`);
+    }
+    await notify(`✅ ${schedule.name} 完了`);
+  } catch (err) {
+    writeError('scheduler', err);
+    await notify(`❌ ${schedule.name} エラー: ${err.message}`);
+  }
+}
+
 async function execute(schedule) {
   if (schedule.type === 'nav') {
     return executeNav(schedule);
   }
   if (schedule.type === 'capital') {
     return executeCapital(schedule);
+  }
+  if (schedule.type === 'weekly') {
+    return executeWeekly(schedule);
   }
   if (isRunning) {
     writeLog('scheduler', `スキップ（実行中）: ${schedule.name}`);

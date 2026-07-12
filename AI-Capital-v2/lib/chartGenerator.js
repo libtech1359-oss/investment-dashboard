@@ -294,4 +294,89 @@ async function generateFundHistoryChart(pfHistory, date) {
   }
 }
 
-module.exports = { generatePortfolioChart, generateFundHistoryChart };
+// ════════════════════════════════════════════════════════════════
+// 週刊: Fear&Greed / VIX 推移ライン
+// ════════════════════════════════════════════════════════════════
+
+function buildWeeklyTrendChartSvg(marketRows) {
+  const W = 760, H = 320, ML = 50, MR = 50, MT = 48, MB = 36;
+  const CW = W - ML - MR, CH = H - MT - MB;
+  const yBot = MT + CH;
+
+  const noDataSvg = (msg) => `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">
+  <rect width="${W}" height="${H}" fill="${BG_DARK}" rx="12"/>
+  <text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="${LABEL_COL}" font-size="12" font-family="sans-serif">${msg}</text>
+</svg>`;
+
+  const rows = (marketRows || []).filter(r => r.date);
+  if (rows.length === 0) return noDataSvg('データなし');
+
+  // VIX は Fear&Greed と同じ 0-100 軸上に ×2 スケールで重ねて表示する
+  const pts = rows.map(r => ({
+    date: r.date,
+    fg:   parseFloat(r.fear_greed ?? NaN),
+    vix:  parseFloat(r.vix ?? NaN),
+  }));
+
+  const n  = pts.length;
+  const dp = n === 1 ? [{ ...pts[0] }, { ...pts[0] }] : pts;
+  const dn = dp.length;
+
+  const yMax = 100;
+  const xOf = i => ML + i / (dn - 1) * CW;
+  const yOf = v => MT + CH - (Math.max(0, Math.min(v, yMax)) / yMax * CH);
+
+  const grid = [], yLbls = [];
+  for (let i = 0; i <= 5; i++) {
+    const v = yMax * i / 5;
+    const y = yOf(v);
+    grid.push(`<line x1="${ML}" y1="${y.toFixed(1)}" x2="${W - MR}" y2="${y.toFixed(1)}" stroke="${GRID_COL}" stroke-width="1"/>`);
+    yLbls.push(`<text x="${ML - 6}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="${LABEL_COL}" font-size="10" font-family="sans-serif">${v.toFixed(0)}</text>`);
+  }
+
+  const xLbls = dp.map((p, i) =>
+    `<text x="${xOf(i).toFixed(1)}" y="${yBot + 20}" text-anchor="middle" fill="${LABEL_COL}" font-size="9" font-family="sans-serif">${p.date.slice(5).replace('-', '/')}</text>`
+  );
+
+  const fgXY  = dp.filter(p => !isNaN(p.fg)).map((p) => [+xOf(dp.indexOf(p)).toFixed(1), +yOf(p.fg).toFixed(1)]);
+  const vixXY = dp.filter(p => !isNaN(p.vix)).map((p) => [+xOf(dp.indexOf(p)).toFixed(1), +yOf(p.vix * 2).toFixed(1)]);
+
+  const fgLine  = smoothPath(fgXY);
+  const vixLine = smoothPath(vixXY);
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" style="font-family:sans-serif">
+  <rect width="${W}" height="${H}" fill="${BG_DARK}" rx="12"/>
+  <text x="${W / 2}" y="24" text-anchor="middle" fill="${TITLE_COL}" font-size="13" font-weight="bold">Fear &amp; Greed ／ VIX（×2）の推移</text>
+  ${grid.join('\n  ')}
+  ${yLbls.join('\n  ')}
+  <path d="${fgLine}" fill="none" stroke="#4A90D9" stroke-width="2" />
+  <path d="${vixLine}" fill="none" stroke="#E8A838" stroke-width="2" />
+  ${xLbls.join('\n  ')}
+  <line x1="${ML}" y1="${MT}" x2="${ML}" y2="${yBot}" stroke="${AXIS_COL}" stroke-width="1"/>
+  <line x1="${ML}" y1="${yBot}" x2="${W - MR}" y2="${yBot}" stroke="${AXIS_COL}" stroke-width="1"/>
+  <rect x="${ML}" y="34" width="12" height="4" fill="#4A90D9"/>
+  <text x="${ML + 16}" y="40" fill="${TITLE_COL}" font-size="10">Fear &amp; Greed</text>
+  <rect x="${ML + 100}" y="34" width="12" height="4" fill="#E8A838"/>
+  <text x="${ML + 116}" y="40" fill="${TITLE_COL}" font-size="10">VIX（×2表示）</text>
+</svg>`;
+}
+
+/**
+ * 週刊 Fear&Greed/VIX 推移チャート PNG を生成する
+ * @param {Array} marketRows  該当週の market_data 行（日付昇順）
+ * @param {string} weekId     'YYYY-Www'（ファイル名に使用）
+ * @returns {Promise<string|null>} PNG パス
+ */
+async function generateWeeklyTrendChart(marketRows, weekId) {
+  try {
+    const svg     = buildWeeklyTrendChartSvg(marketRows);
+    const outPath = path.join(CHARTS_DIR, `${weekId}_trend.png`);
+    await svgToPng(svg, 760, 320, BG_DARK, outPath);
+    return outPath;
+  } catch (err) {
+    console.error(`[chartGenerator] 週刊推移グラフ生成失敗: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { generatePortfolioChart, generateFundHistoryChart, generateWeeklyTrendChart };
