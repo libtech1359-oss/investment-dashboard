@@ -35,7 +35,7 @@ async function generate(articleId, date) {
   <img src="data:image/png;base64,${imgBase64}"
        style="width:100%;height:100%;object-fit:cover;display:block">
   <div style="
-    position:absolute;top:20px;right:20px;
+    position:absolute;bottom:150px;right:20px;
     background:rgba(0,0,0,0.62);
     border-radius:12px;
     padding:14px 24px;
