@@ -5,6 +5,7 @@ const secretary     = require('./secretary');
 const dataFetcher   = require('./lib/dataFetcher');
 const capitalEvents = require('./lib/capitalEvents');
 const weekly        = require('./agents/weekly');
+const health        = require('./lib/health');
 
 const { writeLog, writeError } = (() => {
   const log = (tag, msg) => console.log(`[${tag}] ${msg}`);
@@ -114,6 +115,7 @@ function currentWeekMondayFriday() {
 }
 
 async function executeWeekly(schedule) {
+  health.writeHeartbeat({ pipelineRunning: true, pipelineTask: schedule.name, pipelineStartedAt: new Date().toISOString() });
   try {
     await notify(`▶ ${schedule.name} 開始`);
     const [start, end] = currentWeekMondayFriday();
@@ -127,6 +129,8 @@ async function executeWeekly(schedule) {
   } catch (err) {
     writeError('scheduler', err);
     await notify(`❌ ${schedule.name} エラー: ${err.message}`);
+  } finally {
+    health.writeHeartbeat({ pipelineRunning: false, pipelineTask: null, pipelineStartedAt: null });
   }
 }
 
@@ -145,6 +149,7 @@ async function execute(schedule) {
     return;
   }
   isRunning = true;
+  health.writeHeartbeat({ pipelineRunning: true, pipelineTask: schedule.name, pipelineStartedAt: new Date().toISOString() });
   try {
     await notify(`▶ ${schedule.name} 開始`);
     const result = await secretary.run({
@@ -167,19 +172,24 @@ async function execute(schedule) {
       );
     }
 
-    if (result.article) {
-      await notify(`📝 **X投稿候補**\n\`\`\`\n${result.article.x.slice(0, 280)}\n\`\`\``);
+    if (result.article && !result.article.validationFailed) {
+      await notify(`📝 **X投稿候補**\n\`\`\`\n${result.article.x}\n\`\`\``);
       const noteLines = result.article.note.split('\n');
       const preview   = noteLines.slice(0, 10).join('\n');
       await notify(`📄 **note記事（冒頭）**\n${preview.slice(0, 800)}`);
     }
 
-    await notify(`✅ ${schedule.name} 完了`);
+    if (result.article?.validationFailed) {
+      await notify(`⚠️ ${schedule.name} 完了（記事は整合性チェック失敗のため未公開）`);
+    } else {
+      await notify(`✅ ${schedule.name} 完了`);
+    }
   } catch (err) {
     writeError('scheduler', err);
     await notify(`❌ ${schedule.name} エラー: ${err.message}`);
   } finally {
     isRunning = false;
+    health.writeHeartbeat({ pipelineRunning: false, pipelineTask: null, pipelineStartedAt: null });
   }
 }
 

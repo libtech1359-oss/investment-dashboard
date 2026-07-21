@@ -109,7 +109,12 @@ async function run({ skipPublish = false, onProgress = null } = {}) {
     notify('Step 5/5 記事生成（最終工程）...');
     try {
       article = await publisher.publish(date);
-      notify(`Step 5 完了: note記事 ${article.note.length}字`);
+      if (article?.validationFailed) {
+        const warningsText = (article.validationWarnings || []).join('\n\n');
+        notify(`❌ 【審査部】記事公開ブロック: 整合性チェック失敗（${article.validationWarnings.length}件）\n${warningsText}`);
+      } else {
+        notify(`Step 5 完了: note記事 ${article.note.length}字`);
+      }
     } catch (err) {
       notify(`Step 5 失敗: ${err.message}`);
     }

@@ -25,6 +25,13 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   const finalAmount = parseInt(decision?.amount ?? 0);
   const isBuySignal = ['BUY', 'ACCUMULATE'].includes(finalSignal);
 
+  // 最終判断銘柄は candidate_assets の短名（例: "SOX"）で入るため、部署推薦がフルネーム
+  // （例: "iFreeNEXT 全世界半導体株インデックス"）で書かれていても一致するよう、
+  // 対応する候補行のフルネームも含めて双方向の部分一致で照合する。
+  const finalCandidate  = (candidates ?? []).find(c => c.asset_name === finalAsset);
+  const finalAssetNames = [finalAsset, finalCandidate?.full_name].filter(Boolean);
+  const matchesFinalAsset = text => finalAssetNames.some(name => text.includes(name) || name.includes(text));
+
   // ── Rule 01: 買付候補と最終判断の整合 ────────────────────────
   if (isBuySignal && finalAsset && finalAsset !== 'なし') {
     const candNames = (candidates ?? []).map(c => c.asset_name).filter(Boolean);
@@ -43,9 +50,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
       return ['BUY', 'ACCUMULATE'].includes(t) &&
              r.asset_name && r.asset_name !== 'なし';
     });
-    const matchesFinalAsset = r => r.asset_name === finalAsset ||
-      r.asset_name.startsWith(finalAsset) || r.asset_name.includes(finalAsset);
-    if (buyRecs.length >= 3 && buyRecs.every(r => !matchesFinalAsset(r))) {
+    if (buyRecs.length >= 3 && buyRecs.every(r => !matchesFinalAsset(r.asset_name))) {
       warnings.push(warn(2, '全部署推奨銘柄と最終判断が乖離しています',
         ['部署推奨', buyRecs.map(r => `${r.department} → ${r.asset_name}`)],
         ['最終判断', [`・${finalAsset}`]],
@@ -269,10 +274,79 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     }
   }
 
+  // ── Rule 11: 結論系セクション（見どころ／論点／秘書室長所見）の銘柄整合性 ──
+  // ── Rule 12: 部署合意状況の言及整合性 ─────────────────────────
+  const SUMMARY_SECTIONS = [
+    { name: '今日の見どころ', patterns: [/📌[^\n]*今日の見どころ/, /今日の見どころ/] },
+    { name: '本日の論点',     patterns: [/🔴[^\n]*本日の論点/, /本日の論点/] },
+    { name: '秘書室長所見',   patterns: [/👑[^\n]*秘書室長/, /秘書室長所見/] },
+  ];
+  const sectionBodies = {};
+  for (const sec of SUMMARY_SECTIONS) {
+    sectionBodies[sec.name] = extractSectionBody(note, sec.patterns);
+  }
+
+  if (isBuySignal && finalAsset && finalAsset !== 'なし') {
+    const otherAssetNames = (candidates ?? [])
+      .map(c => c.asset_name)
+      .filter(name => name && name !== finalAsset);
+
+    for (const sec of SUMMARY_SECTIONS) {
+      const body = sectionBodies[sec.name];
+      if (!body) continue;
+      const mentionedOthers = otherAssetNames.filter(name => body.includes(name));
+      if (mentionedOthers.length > 0 && !matchesFinalAsset(body)) {
+        warnings.push(warn(11, `${sec.name}が最終判断銘柄と矛盾している可能性があります`,
+          ['最終判断銘柄',   [`・${finalAsset}`]],
+          ['検出した他銘柄', mentionedOthers],
+          [`${sec.name}本文`, [body.slice(0, 120)]],
+        ));
+      }
+    }
+  }
+
+  if (recs && recs.length >= 2) {
+    const comboSet = new Set(recs.map(r => {
+      const t = (r.recommendation_type || r.action || '').toUpperCase();
+      const a = (t === 'WAIT' || !r.asset_name) ? 'なし' : r.asset_name;
+      return `${t}:${a}`;
+    }));
+    const hasRealConsensus = comboSet.size <= 1;
+    const hasRealConflict  = comboSet.size >= 2;
+    const combinedText     = Object.values(sectionBodies).join('\n');
+
+    if (/全部署一致|満場一致|全員一致|全社一致/.test(combinedText) && hasRealConflict) {
+      warnings.push(warn(12, '「全部署一致」等の表現が実際の部署投票と矛盾しています',
+        ['部署投票', recs.map(r => `${r.department} → ${r.recommendation_type || r.action}${r.asset_name && r.asset_name !== 'なし' ? ' ' + r.asset_name : ''}`)],
+      ));
+    }
+    if (/意見が割れ|割れた|対立|賛否両論/.test(combinedText) && hasRealConsensus) {
+      warnings.push(warn(12, '「意見が割れた」等の表現が実際の部署投票と矛盾しています',
+        ['部署投票', recs.map(r => `${r.department} → ${r.recommendation_type || r.action}${r.asset_name && r.asset_name !== 'なし' ? ' ' + r.asset_name : ''}`)],
+      ));
+    }
+  }
+
   return { ok: warnings.length === 0, warnings };
 }
 
 // ── ヘルパー ──────────────────────────────────────────────────
+
+/**
+ * 見出しパターンに一致するセクションの本文を抽出する（次のメジャーセクションまで）。
+ * Rule 10 の空セクション判定と同じ境界ロジックを再利用する。
+ */
+function extractSectionBody(note, headerPatterns) {
+  for (const pat of headerPatterns) {
+    const m = note.match(pat);
+    if (!m) continue;
+    const start = note.indexOf(m[0]);
+    const after = note.slice(start + m[0].length);
+    const nextIdx = after.search(/\n(?:🌍|🎯|🏢|⚖️|👀|👑|💰|🎪)/);
+    return (nextIdx >= 0 ? after.slice(0, nextIdx) : after.slice(0, 500)).trim();
+  }
+  return '';
+}
 
 /**
  * 監査警告メッセージを整形する。
