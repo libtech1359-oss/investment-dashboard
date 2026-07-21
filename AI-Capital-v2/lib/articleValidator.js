@@ -43,7 +43,9 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
       return ['BUY', 'ACCUMULATE'].includes(t) &&
              r.asset_name && r.asset_name !== 'なし';
     });
-    if (buyRecs.length >= 3 && buyRecs.every(r => r.asset_name !== finalAsset)) {
+    const matchesFinalAsset = r => r.asset_name === finalAsset ||
+      r.asset_name.startsWith(finalAsset) || r.asset_name.includes(finalAsset);
+    if (buyRecs.length >= 3 && buyRecs.every(r => !matchesFinalAsset(r))) {
       warnings.push(warn(2, '全部署推奨銘柄と最終判断が乖離しています',
         ['部署推奨', buyRecs.map(r => `${r.department} → ${r.asset_name}`)],
         ['最終判断', [`・${finalAsset}`]],
@@ -226,12 +228,14 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
 
   // ── Rule 10: 空セクションチェック ────────────────────────────
   const SECTIONS = [
-    { name: '今日の市場',   patterns: [/🌍[^\n]*今日の市場/, /今日の市場/] },
-    { name: '買付候補',     patterns: [/🎯[^\n]*買付候補/, /本日の買付候補/] },
-    { name: '部署判断',     patterns: [/🏢[^\n]*(?:部署|判断)/, /各部署の判断/] },
-    { name: '最終判断',     patterns: [/⚖️[^\n]*最終判断/, /最終判断/] },
-    { name: '次回の注目点', patterns: [/👀[^\n]*注目点/, /次回の注目点/] },
-    { name: '秘書室長所見', patterns: [/👑[^\n]*秘書室長/, /秘書室長所見/] },
+    { name: '今日の市場',       patterns: [/🌍[^\n]*今日の市場/, /今日の市場/] },
+    { name: '買付候補',         patterns: [/🎯[^\n]*買付候補/, /本日の買付候補/] },
+    { name: '部署判断',         patterns: [/🏢[^\n]*(?:部署|判断)/, /各部署の判断/] },
+    { name: '最終判断',         patterns: [/⚖️[^\n]*最終判断/, /最終判断/] },
+    { name: 'ポートフォリオ情報', patterns: [/💰[^\n]*AI Capital模擬ファンド/, /AI Capital模擬ファンド/] },
+    { name: '次回の注目点',     patterns: [/👀[^\n]*注目点/, /次回の注目点/] },
+    { name: '秘書室長所見',     patterns: [/👑[^\n]*秘書室長/, /秘書室長所見/] },
+    { name: '免責事項',         patterns: [/AI Capitalは投資助言サービスではありません/] },
   ];
 
   for (const sec of SECTIONS) {

@@ -30,19 +30,31 @@
 
 const sheets = require('./sheets');
 
-const SIGNAL_WEIGHT = { BUY: 2.0, ACCUMULATE: 1.0, WAIT: 0.0, DEFEND: -1.0, SELL: -2.0 };
+const SIGNAL_WEIGHT = {
+  BUY: 2.0, ACCUMULATE: 1.0, WAIT: 0.0, DEFEND: -1.0, SELL: -2.0,
+  // 財務戦略部（現在未配線・config/financeStrategy.js有効化後に使用）
+  HOLD: 0.0, REDUCE: -1.0, REBALANCE: 0.0,
+};
 
 function todayJST() {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 }
 
-// agent_recommendationsの資産名（フルネーム可）とcandidate_assetsの短名を照合
-// 例: "ゴールド（SBI・iシェアーズ・ゴールドファンド）" → "ゴールド" に一致
-function matchAsset(recAssetName, candidateShortName) {
+// agent_recommendationsの資産名（短名/フルネームどちらでも可）とcandidate_assetsの
+// 短名・フルネームを双方向の部分一致で照合する。
+// 例1: "ゴールド（SBI・iシェアーズ・ゴールドファンド）" → 短名"ゴールド"に一致（recがcandを含む）
+// 例2: "全世界半導体株インデックス" → フルネーム"iFreeNEXT 全世界半導体株インデックス"に一致（candがrecを含む）
+function matchesOne(recAssetName, candName) {
+  if (!candName) return false;
+  return recAssetName === candName ||
+         recAssetName.includes(candName) ||
+         candName.includes(recAssetName);
+}
+
+function matchAsset(recAssetName, candidate) {
   if (!recAssetName || recAssetName === 'なし') return false;
-  return recAssetName === candidateShortName ||
-         recAssetName.startsWith(candidateShortName) ||
-         recAssetName.includes(candidateShortName);
+  return matchesOne(recAssetName, candidate.asset_name) ||
+         matchesOne(recAssetName, candidate.full_name);
 }
 
 async function run(date) {
@@ -96,10 +108,15 @@ async function run(date) {
       } else {
         const maxRank = candidates.length;
 
-        // 有効な部署推薦（資産・金額が具体的なもの）
-        const validRecs = recs.filter(r =>
-          r.asset_name && r.asset_name !== 'なし' && parseInt(r.amount || 0) > 0
-        );
+        // 有効な部署推薦（買い方向・資産・金額が具体的なもの）
+        // action/recommendation_typeがBUY/ACCUMULATE以外（REDUCE/SELL/REBALANCE等）は
+        // 売り方向の金額を買い候補スコアに混入させないため除外する
+        const BUY_ACTIONS = new Set(['BUY', 'ACCUMULATE']);
+        const validRecs = recs.filter(r => {
+          const action = (r.recommendation_type || r.action || '').toUpperCase();
+          return BUY_ACTIONS.has(action) &&
+            r.asset_name && r.asset_name !== 'なし' && parseInt(r.amount || 0) > 0;
+        });
         const totalValidRecs = Math.max(validRecs.length, 1);
 
         // 各候補銘柄の combined score を計算
@@ -108,7 +125,7 @@ async function run(date) {
           const candidateScore = (maxRank - rank + 1) / maxRank;  // rank1=1.0, rank9=0.111
 
           // この銘柄を推薦した部署数
-          const matchedRecs = validRecs.filter(r => matchAsset(r.asset_name, c.asset_name));
+          const matchedRecs = validRecs.filter(r => matchAsset(r.asset_name, c));
           const deptScore   = matchedRecs.length / totalValidRecs;
 
           const combined = candidateScore * 0.5 + deptScore * 0.5;
