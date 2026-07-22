@@ -648,9 +648,10 @@ ATH乖離率を根拠にする場合でも、それは神谷シンの発言の�
 最後の結論も「総合的に慎重ながら〜」のような曖昧な要約表現は禁止。判定の延長として簡潔に書くこと（例：「よって観測ポジション構築を支持する」）。全体3〜4行以内。）
 
 ## ⚖️ 最終判断
-【最重要】構造ブロック（シグナル／対象／金額／部署判断の4行）はシステムが挿入する。ここには相沢レイの補足コメント（1〜2文）のみを書くこと。
-禁止：「対象銘柄：」「金額：」「根拠：」「シグナル：」「全社合意」などの記述。コンテキストの内容をそのまま転記すること全般。
-書き方例：「市場の過度な恐怖を踏まえ、最小限のポジション構築という結論に至りました。」のように相沢レイの言葉で1〜2文のみ。
+【最重要】このセクションに本文・コメントは一切書かないこと。見出しのみ出力し、すぐ次のセクションに進むこと。
+シグナル／対象／金額／部署判断の4行はシステムが自動挿入する。
+相沢レイの所見・補足コメントは「👑 秘書室長所見」でのみ書くこと（ここに書くと秘書室長所見と内容が重複するため厳禁）。
+禁止：「対象銘柄：」「金額：」「根拠：」「シグナル：」「全社合意」などの記述、コンテキストの内容の転記、相沢レイのコメント文。
 
 ## 🔴 本日の論点
 （本日の会議全体で実際に議論になったテーマ・対立軸のみを1〜2点で要約する。テンプレート的な固定文は禁止。
@@ -732,7 +733,7 @@ AIが次回会議までに何を見るかを「条件 → アクション」で�
 □ 各部署の要約に記載した金額がコンテキスト「各部署が事前に算出した提案額」と一致しているか
 □ 鬼塚の要約に「神谷の〜については」「黒崎の〜については」「アオイの〜については」が全部あるか
 □ 鬼塚の要約が「成立/不足/妥当/過大」等の短い判定文になっているか（「総合的に慎重ながら〜」のような曖昧な要約で終わっていないか）
-□ 最終判断セクションに相沢レイの補足コメント（1〜2文）のみが書かれているか（シグナル再記述禁止）
+□ 最終判断セクションに本文・コメントを一切書いていないか（見出しのみで次のセクションに進んでいるか。相沢レイの所見は秘書室長所見にのみ書くこと）
 □ 秘書室長所見に「誰が何を主張し、どこで食い違ったか」の争点記述と「今日の会議の空気感」の一文があるか
 □ 秘書室長所見が、個別発言の要約だけで終わらず「今日の対立は本質的に何についてだったか」を一段俯瞰したコメントで締めているか
 □ 次回の注目点が数値付きの監視ライン形式になっているか（「様子見継続」のみは禁止）
@@ -906,11 +907,14 @@ function injectRecommendationSummary(note, recs, decision, pf) {
   const assetName   = decision.target_asset || 'なし';
 
   // 全社判断（vote counts from recs）
+  // シグナルがACCUMULATE等でも、具体的な銘柄・金額を伴わない提案（例：橘の「なし ¥0」）は
+  // 実質的に「見送り」であり「賛成」に数えない（部署判断の表記を実際の議論内容と一致させる）
   const voteCount = { buy: 0, wait: 0, defend: 0 };
   for (const r of recs) {
     const action = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
-    if (['BUY', 'ACCUMULATE'].includes(action)) voteCount.buy++;
-    else if (action === 'WAIT') voteCount.wait++;
+    const hasConcreteAsset = r.asset_name && r.asset_name !== 'なし' && parseInt(r.amount || 0) > 0;
+    if (['BUY', 'ACCUMULATE'].includes(action) && hasConcreteAsset) voteCount.buy++;
+    else if (['BUY', 'ACCUMULATE', 'WAIT'].includes(action)) voteCount.wait++;
     else voteCount.defend++;
   }
   const totalVotes = voteCount.buy + voteCount.wait + voteCount.defend;
@@ -918,8 +922,8 @@ function injectRecommendationSummary(note, recs, decision, pf) {
   const voteParts = [];
   if (totalVotes > 0) {
     voteParts.push(`${totalVotes}部署中`);
-    if (voteCount.buy    > 0) voteParts.push(`賛成${voteCount.buy}`);
-    if (voteCount.wait   > 0) voteParts.push(`様子見${voteCount.wait}`);
+    if (voteCount.buy    > 0) voteParts.push(`買付支持${voteCount.buy}`);
+    if (voteCount.wait   > 0) voteParts.push(`見送り${voteCount.wait}`);
     if (voteCount.defend > 0) voteParts.push(`反対${voteCount.defend}`);
   }
 
