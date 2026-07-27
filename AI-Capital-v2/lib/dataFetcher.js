@@ -12,9 +12,15 @@
  * コード修正は一切不要。
  */
 
-const sheets        = require('./sheets');
-const capitalEvents = require('./capitalEvents');
+const sheets              = require('./sheets');
+const capitalEvents       = require('./capitalEvents');
 const { autoFillPendingOrders } = require('./orderManager');
+const CANDIDATE_SCORE_WEIGHTS = require('../config/candidateScoreWeights');
+const TARGET_ALLOCATION       = require('../config/targetAllocation');
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
 
 function todayJST() {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
@@ -179,7 +185,12 @@ async function writeMarketData() {
 //
 // 出力列:
 //   nav, ath_nav, ath_gap_pct, daily_change_pct, chg_5d, chg_20d, rebound_rate
-//   score = -ATH乖離*0.6 + -前日比*0.4 の逆張りスコア
+//   score = 総合評価スコア（config/candidateScoreWeights.js の重みで合成）。
+//     価格モメンタム（ATH乖離・前日比）とポートフォリオ構成（保有比率・目標配分乖離・
+//     カテゴリー分散）を正規化して加重合成する。「下落幅が大きいほど高スコア」という
+//     単一方向のロジック（旧: 逆張りスコア）は廃止し、いずれの成分も単独でスコアを
+//     支配しない設計にしている。Fear & Greed / VIX は全銘柄共通の値で銘柄間の
+//     相対順位を左右しないためスコアには含めない（部署の判断材料として別途提供）。
 //   nav_ok: nav_pricesにデータが存在すれば TRUE
 //
 // 銘柄追加時: asset_master シートへ1行追加するだけで自動対応。コード修正不要。
@@ -212,6 +223,34 @@ async function writeCandidateAssets() {
     console.warn(`[dataFetcher] nav_prices 読み込み失敗（N/A で続行）: ${err.message}`);
   }
 
+  // 総合評価スコアに必要なポートフォリオ構成データ（保有比率・目標配分乖離・カテゴリー分散）を取得。
+  // updatePortfolioStatus() は run() 内でこの関数より先に実行されるため、当日分が既に存在する。
+  let pf = null, positions = [];
+  try {
+    [pf, positions] = await Promise.all([
+      sheets.getLatestRow('portfolio_status').catch(() => null),
+      sheets.getRows('positions').catch(() => []),
+    ]);
+  } catch (err) {
+    console.warn(`[dataFetcher] ポートフォリオ構成データ取得失敗（保有・配分成分は0で続行）: ${err.message}`);
+  }
+
+  const totalAssets   = pf ? parseFloat(pf.total_assets ?? 0) : 0;
+  const investedTotal = pf ? parseFloat(pf.invested ?? 0) : 0;
+
+  const holdingByAsset = {};   // asset_name → market_value
+  const categoryTotals = {};   // category → market_value合計
+  let categoryTotalSum = 0;
+  for (const p of positions) {
+    const mv = parseFloat(p.market_value || 0);
+    holdingByAsset[p.asset_name] = (holdingByAsset[p.asset_name] || 0) + mv;
+    const cat = p.category || 'fund';
+    categoryTotals[cat] = (categoryTotals[cat] || 0) + mv;
+    categoryTotalSum += mv;
+  }
+
+  const W = CANDIDATE_SCORE_WEIGHTS;
+
   const candidates = enabled.map(m => {
     const nm     = navMetrics[m.id];
     const hasNav = nm != null;
@@ -226,7 +265,33 @@ async function writeCandidateAssets() {
 
     const athN   = hasNav ? parseFloat(ath_gap_pct)      : 0;
     const dailyN = hasNav ? parseFloat(daily_change_pct) : 0;
-    const score  = hasNav ? Math.round((-athN * 0.6 + (-dailyN) * 0.4) * 10) : 0;
+
+    // 各成分を -1〜+1（保有・カテゴリー成分は -1〜0）に正規化してから重みを掛ける。
+    // スケールの異なる指標（%乖離 vs 円ベースの保有比率）を対等に扱うための正規化。
+    const athComponent   = clamp(-athN, -30, 30) / 30;      // ATH乖離が大きいほど+1に近づく
+    const dailyComponent = clamp(-dailyN, -5, 5) / 5;       // 前日比の下落が大きいほど+1に近づく
+
+    const heldValue        = holdingByAsset[m.short_name] || 0;
+    const holdingRatioPct  = totalAssets > 0 ? (heldValue / totalAssets * 100) : 0;
+    const holdingComponent = -clamp(holdingRatioPct, 0, 100) / 100; // 保有比率が高いほど減点（集中抑制）
+
+    const currentAllocPct  = investedTotal > 0 ? (heldValue / investedTotal * 100) : 0;
+    const targetAllocPct   = TARGET_ALLOCATION[m.short_name] ?? 0;
+    const allocationGapPct = targetAllocPct - currentAllocPct; // 不足ならプラス、超過ならマイナス
+    const allocationComponent = clamp(allocationGapPct, -50, 50) / 50;
+
+    const categoryMv          = categoryTotals[m.category || 'fund'] || 0;
+    const categoryRatioPct    = categoryTotalSum > 0 ? (categoryMv / categoryTotalSum * 100) : 0;
+    const categoryComponent   = -clamp(categoryRatioPct, 0, 100) / 100; // カテゴリー内保有比率が高いほど減点（分散推奨）
+
+    const weighted = hasNav
+      ? athComponent   * W.ATH_GAP_WEIGHT
+      + dailyComponent * W.DAILY_CHANGE_WEIGHT
+      + holdingComponent    * W.HOLDING_RATIO_WEIGHT
+      + allocationComponent * W.ALLOCATION_GAP_WEIGHT
+      + categoryComponent   * W.CATEGORY_DIVERSITY_WEIGHT
+      : 0;
+    const score = Math.round(weighted * 100);
 
     return {
       date,
@@ -258,8 +323,8 @@ async function writeCandidateAssets() {
     await sheets.upsertRow('candidate_assets', ['date', 'asset_id'], c);
   }
 
-  const summary = candidates.map(c => `${c.rank}.${c.asset_name}(${c.ath_gap_pct}%)`).join(' ');
-  console.log(`[dataFetcher] candidate_assets 完了: ${candidates.length}銘柄 [${summary}]`);
+  const summary = candidates.map(c => `${c.rank}.${c.asset_name}(score=${c.score})`).join(' ');
+  console.log(`[dataFetcher] candidate_assets 完了（総合評価スコア順）: ${candidates.length}銘柄 [${summary}]`);
   return candidates;
 }
 
@@ -290,7 +355,8 @@ async function updatePortfolioStatus() {
   const date   = todayJST();
   const orders = await sheets.getRows('orders').catch(() => []);
 
-  const filledMap  = {};  // asset_id → { asset_name, cost_basis, quantity, category, lots }
+  const filledMap  = {};  // asset_id → { asset_name, category, lots }
+  const soldMap    = {};  // asset_id → [{ date, amount }] — 財務戦略部REDUCE/SELLによる売却（取得原価相当額）
   const pendingList = []; // [{ name, amount }] — portfolio_status.pending_json 用
   let   pendingAmt = 0;
 
@@ -304,15 +370,16 @@ async function updatePortfolioStatus() {
         filledMap[key] = {
           asset_name: o.asset_name,
           asset_id:   o.asset_id || key,
-          cost_basis: 0,
-          quantity:   0,
           category:   o.category || 'fund',
           lots:       [], // [{ date, amount }] — 取得時点NAVの逆引き用（複数回買付時の加重評価に必要）
         };
       }
-      filledMap[key].cost_basis += amt;
-      filledMap[key].quantity   += 1;
       filledMap[key].lots.push({ date: o.date, amount: amt });
+    } else if (o.status === 'sold') {
+      // 財務戦略部（REDUCE/SELL）による売却注文。amountは買い注文と同じ単位（削減する取得原価相当額）。
+      const key = o.asset_id || o.asset_name;
+      if (!soldMap[key]) soldMap[key] = [];
+      soldMap[key].push({ date: o.date, amount: amt });
     } else if (['pending', 'ordered'].includes(o.status)) {
       pendingAmt += amt;
       pendingList.push({ name: o.asset_name, amount: amt });
@@ -330,25 +397,55 @@ async function updatePortfolioStatus() {
 
   let marketValueTotal = 0;
   let unrealizedTotal  = 0;
+  let realizedPlTotal  = 0; // 財務戦略部REDUCE/SELLによる実現損益累計
   const positionsList  = []; // portfolio_status.positions_json 用
+  const positionsRows  = []; // positions シート（丸ごと置換）用
 
   for (const [key, data] of Object.entries(filledMap)) {
     const nm = navMetrics[data.asset_id] || navMetrics[data.asset_name] || null;
 
-    // 時価 = 各ロットを取得時点NAV基準で現在NAVに再評価した合計。
+    // ── FIFO売却消費 ──────────────────────────────────────────
+    // soldMap（財務戦略部REDUCE/SELL）にある分だけ、古いロットから順に取得原価を減らす。
+    // 消費したロットは現在NAVで再評価し、原価との差分を実現損益として計上する。
+    const lots = data.lots
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map(l => ({ ...l })); // clone（破壊的操作のため）
+
+    for (const sell of (soldMap[key] || [])) {
+      let toRemove = sell.amount;
+      while (toRemove > 0 && lots.length > 0) {
+        const lot      = lots[0];
+        const consumed = Math.min(lot.amount, toRemove);
+        const entryNav = navAsOf(nm, lot.date);
+        const proceeds = (nm && entryNav > 0) ? consumed * (nm.nav / entryNav) : consumed;
+        realizedPlTotal += proceeds - consumed;
+        lot.amount -= consumed;
+        toRemove   -= consumed;
+        if (lot.amount <= 0) lots.shift();
+      }
+      if (toRemove > 0) {
+        console.warn(`[dataFetcher] ${data.asset_name} 売却額が保有原価を超過: 超過分¥${toRemove.toLocaleString()}を無視`);
+      }
+    }
+
+    const costBasis = lots.reduce((s, l) => s + l.amount, 0);
+    if (costBasis <= 0) continue; // 全売却済み → positions/positions_jsonから除外（ゴースト行防止）
+
+    // 時価 = 残存ロットを取得時点NAV基準で現在NAVに再評価した合計。
     // 取得時点のNAVが引けない場合（データ欠損）は、そのロットのみ取得原価をそのまま使う
     // （従来の暫定動作にフォールバックするだけで、既存ロットの評価を悪化させない）。
     let market_value;
     if (nm && nm.nav > 0) {
-      market_value = Math.round(data.lots.reduce((sum, lot) => {
+      market_value = Math.round(lots.reduce((sum, lot) => {
         const entryNav = navAsOf(nm, lot.date);
         if (!entryNav || entryNav <= 0) return sum + lot.amount;
         return sum + lot.amount * (nm.nav / entryNav);
       }, 0));
     } else {
-      market_value = data.cost_basis;
+      market_value = costBasis;
     }
-    const unrealized_pl    = market_value - data.cost_basis;
+    const unrealized_pl    = market_value - costBasis;
     const current_nav      = nm ? String(nm.nav)            : 'N/A';
     const ath_nav          = nm ? String(nm.ath_nav)         : 'N/A';
     const ath_gap_pct      = nm ? nm.ath_gap_pct.toFixed(2) : 'N/A';
@@ -357,11 +454,10 @@ async function updatePortfolioStatus() {
     marketValueTotal += market_value;
     unrealizedTotal  += unrealized_pl;
 
-    // positions シートへ書き込み（人間向け閲覧用）
-    await sheets.upsertRow('positions', ['asset_name'], {
+    positionsRows.push({
       asset_name:      data.asset_name,
-      quantity:        String(data.quantity),
-      cost_basis:      String(data.cost_basis),
+      quantity:        String(lots.length),
+      cost_basis:      String(costBasis),
       market_value:    String(market_value),
       unrealized_pl:   String(unrealized_pl),
       current_nav,
@@ -374,7 +470,7 @@ async function updatePortfolioStatus() {
     // portfolio_status.positions_json 用に収集（エージェント参照用 Single Source of Truth）
     positionsList.push({
       name:            data.asset_name,
-      cost_basis:      data.cost_basis,
+      cost_basis:      costBasis,
       market_value,
       unrealized_pl,
       current_nav,
@@ -383,19 +479,33 @@ async function updatePortfolioStatus() {
     });
   }
 
-  const filledTotal   = Object.values(filledMap).reduce((s, v) => s + v.cost_basis, 0);
+  // positions シートを丸ごと再構築（全売却済み銘柄のゴースト行を残さない）
+  // upsertでは行削除ができないため、clear_sheetで全行削除してから書き直す。
+  // orders取得が0件の場合はfetch失敗の可能性がある（.catch(()=>[])で握り潰されるため判別不能）ため、
+  // 誤って正常なpositionsシートを消さないよう再構築自体をスキップする。
+  if (orders.length > 0) {
+    await sheets.clearSheet('positions');
+    for (const row of positionsRows) {
+      await sheets.appendRow('positions', row);
+    }
+  } else {
+    console.warn('[dataFetcher] orders取得0件のためpositionsシート再構築をスキップ（fetch失敗の可能性）');
+  }
+
+  const filledTotal   = positionsList.reduce((s, p) => s + p.cost_basis, 0); // 残存ロットの原価合計
   // invested = 約定済みポジションの現在評価額（cost_basis ベース、nav蓄積後は市場価値に移行）
   const invested      = marketValueTotal;
   const unrealizedPl  = marketValueTotal - filledTotal;   // 含み損益 = 評価額 - 取得額
 
   // 総元本 = capital_events の累計（asOfDate 以前のイベントのみ集計）
+  // + realizedPlTotal（財務戦略部REDUCE/SELLによる実現損益。売却で戻った現金分を反映）
   const totalPrincipal = await capitalEvents.calcTotalPrincipal(date);
-  const cash           = Math.max(0, totalPrincipal - pendingAmt - filledTotal);
+  const cash           = Math.max(0, totalPrincipal + realizedPlTotal - pendingAmt - filledTotal);
   const totalAssets    = cash + pendingAmt + invested;
   const cashRatio     = totalAssets > 0 ? (cash / totalAssets * 100).toFixed(1) : '100.0';
 
   const sourceOrders    = orders.length;
-  const sourcePositions = Object.keys(filledMap).length;
+  const sourcePositions = positionsList.length;
 
   // 状態変化チェック — 前回レコードと全数値が一致する場合は append をスキップ
   const prevPf = await sheets.getLatestRow('portfolio_status').catch(() => null);
@@ -425,13 +535,14 @@ async function updatePortfolioStatus() {
   });
 
   const posSummary = sourcePositions > 0
-    ? Object.values(filledMap).map(d => `${d.asset_name}:¥${d.cost_basis.toLocaleString()}`).join(', ')
+    ? positionsList.map(p => `${p.name}:¥${p.cost_basis.toLocaleString()}`).join(', ')
     : 'なし';
 
   console.log('[Portfolio Status Rebuild]');
   console.log(`  timestamp=${timestamp}`);
   console.log(`  totalPrincipal=¥${totalPrincipal.toLocaleString()}  （capital_events累計元本）`);
-  console.log(`  cash=¥${cash.toLocaleString()}  （自由現金 = 元本 - pending - filled）`);
+  if (realizedPlTotal !== 0) console.log(`  realizedPl=¥${realizedPlTotal.toLocaleString()}  （財務戦略部REDUCE/SELL実現損益累計）`);
+  console.log(`  cash=¥${cash.toLocaleString()}  （自由現金 = 元本 + 実現損益 - pending - filled）`);
   console.log(`  pending=¥${pendingAmt.toLocaleString()}  （注文中・未約定）`);
   console.log(`  invested=¥${invested.toLocaleString()}  （約定済み評価額）`);
   console.log(`  unrealized_pl=¥${unrealizedPl.toLocaleString()}  （含み損益）`);

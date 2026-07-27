@@ -315,14 +315,388 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     const hasRealConflict  = comboSet.size >= 2;
     const combinedText     = Object.values(sectionBodies).join('\n');
 
-    if (/全部署一致|満場一致|全員一致|全社一致/.test(combinedText) && hasRealConflict) {
-      warnings.push(warn(12, '「全部署一致」等の表現が実際の部署投票と矛盾しています',
+    // 「全部署一致」等は文字通り"全部署が同じ判断"の場合のみ矛盾とみなす。
+    // 「リスク管理部を除く全部署が」「残り全部署が」等、一部部署の例外を明示した
+    // 全会一致表現（＝多数派＋少数派の要約）は正常な表現なので対象外とする。
+    const UNANIMOUS_RE   = /全部署一致|満場一致|全員一致|全社一致|全部署が|全員が/;
+    const QUALIFIER_RE   = /除く|除き|以外|のみ|残り|他は|他の部署/;
+    const BUY_ACTION_RE  = /買い|ACCUMULATE|購入|買付|BUY/i;
+    const WAIT_ACTION_RE = /WAIT|見送り|様子見|待機|静観/i;
+
+    const actualTypes           = [...new Set(recs.map(r => (r.recommendation_type || r.action || '').toUpperCase()))];
+    const actualIsBuyUnanimous  = hasRealConsensus && ['BUY', 'ACCUMULATE'].includes(actualTypes[0]);
+    const actualIsWaitUnanimous = hasRealConsensus && actualTypes[0] === 'WAIT';
+
+    // 「〜を除く」等の限定表現は同一文中で判定するため文単位に分割する
+    const unanimousSentences = combinedText
+      .split(/(?<=[。\n])/)
+      .filter(s => UNANIMOUS_RE.test(s) && !QUALIFIER_RE.test(s));
+
+    const unanimousMismatch = unanimousSentences.some(s => {
+      if (hasRealConflict) return true; // 実際は部署間で判断が割れているのに全会一致を主張
+      if (actualIsWaitUnanimous && BUY_ACTION_RE.test(s) && !WAIT_ACTION_RE.test(s)) return true; // 実際は全部署WAITなのに「買いで一致」
+      if (actualIsBuyUnanimous && WAIT_ACTION_RE.test(s) && !BUY_ACTION_RE.test(s)) return true; // 実際は全部署買いなのに「見送りで一致」
+      return false;
+    });
+
+    if (unanimousMismatch) {
+      warnings.push(warn(12, '「全部署が」等の全会一致表現が実際の部署投票と矛盾しています',
         ['部署投票', recs.map(r => `${r.department} → ${r.recommendation_type || r.action}${r.asset_name && r.asset_name !== 'なし' ? ' ' + r.asset_name : ''}`)],
       ));
     }
     if (/意見が割れ|割れた|対立|賛否両論/.test(combinedText) && hasRealConsensus) {
       warnings.push(warn(12, '「意見が割れた」等の表現が実際の部署投票と矛盾しています',
         ['部署投票', recs.map(r => `${r.department} → ${r.recommendation_type || r.action}${r.asset_name && r.asset_name !== 'なし' ? ' ' + r.asset_name : ''}`)],
+      ));
+    }
+  }
+
+  if (/前回購入価格比/.test(note)) {
+    warnings.push(warn(13, '「前回購入価格比」は算出ロジックが未整備のため記事へ出力禁止です',
+      ['検出箇所', [note.slice(Math.max(0, note.indexOf('前回購入価格比') - 30), note.indexOf('前回購入価格比') + 30)]],
+    ));
+  }
+  if (/集中投資率[^\n]{0,15}(不明|算出できません|わかりません)/.test(note)) {
+    warnings.push(warn(13, '集中投資率を「不明」等として出力しています（コンテキストに数値があるはずです）'));
+  }
+
+  // ── Rule 14: 逆張り用語の誤用 ──────────────────────────────────
+  if (/逆張りによる売却/.test(note)) {
+    warnings.push(warn(14, '「逆張りによる売却」という禁止表現が使われています（逆張りは買い増しを意味する）'));
+  }
+
+  // ── Rule 15: 管理者個人情報の禁止語 ──────────────────────────
+  const PERSONAL_INFO_TERMS = ['生活防衛資金', '個人NISA', '個人口座残高', '個人資産状況'];
+  for (const term of PERSONAL_INFO_TERMS) {
+    if (note.includes(term)) {
+      warnings.push(warn(15, `管理者個人情報に該当する禁止語「${term}」が記事に含まれています`));
+    }
+  }
+
+  // ── Rule 16: 内部シグナル英語の残留 ──────────────────────────
+  const englishSignalMatch = note.match(/\b(WAIT|BUY|SELL|ACCUMULATE|DEFEND)\b/);
+  if (englishSignalMatch) {
+    warnings.push(warn(16, '内部シグナル英語がそのまま出力されています（日本語表現に変換すること）',
+      ['検出語', [englishSignalMatch[0]]],
+    ));
+  }
+
+  // ── Rule 17: 橘アオイの禁止表現 ──────────────────────────────
+  if (/最終投資額は.{0,10}(決定|確定)/.test(note)) {
+    warnings.push(warn(17, '「最終投資額は〜に決定」という禁止表現が使われています（銘柄選定・最終決定は相沢レイの役割）'));
+  }
+
+  // ── 部署本文抽出ヘルパー（Rule 18以降で使用） ─────────────────
+  const DEPT_HEADERS = {
+    shin:   { label: '神谷',   pattern: /😎[^\n]*マーケット分析部/ },
+    misaki: { label: '黒崎',   pattern: /🤨[^\n]*リスク管理部/ },
+    aoi:    { label: 'アオイ', pattern: /🙂[^\n]*ポートフォリオ管理部/ },
+    gai:    { label: '鬼塚',   pattern: /🧐[^\n]*審査部/ },
+  };
+  function extractDeptBody(pattern) {
+    const m = note.match(pattern);
+    if (!m) return null;
+    const start = note.indexOf(m[0]);
+    const after = note.slice(start + m[0].length);
+    const nextIdx = after.search(/\n(?:🌍|🎯|🏢|⚖️|👀|👑|💰|🎪|😎|🤨|🙂|🧐)/);
+    return (nextIdx >= 0 ? after.slice(0, nextIdx) : after.slice(0, 500)).trim();
+  }
+
+  // ── Rule 18: 部署見出しの重複掲載 ────────────────────────────
+  const DEPT_HEADER_GLOBAL = [
+    ['マーケット分析部', /😎[^\n]*マーケット分析部/g],
+    ['リスク管理部',     /🤨[^\n]*リスク管理部/g],
+    ['ポートフォリオ管理部', /🙂[^\n]*ポートフォリオ管理部/g],
+    ['審査部',           /🧐[^\n]*審査部/g],
+  ];
+  for (const [name, pat] of DEPT_HEADER_GLOBAL) {
+    const count = (note.match(pat) ?? []).length;
+    if (count > 1) {
+      warnings.push(warn(18, `${name}の見出しが記事内に${count}回出現しています（1回のみが正常）`));
+    }
+  }
+
+  // ── Rule 19: 秘書室長所見の部署名主語 ────────────────────────
+  const reiBody = extractSectionBody(note, [/👑[^\n]*秘書室長/, /秘書室長所見/]);
+  const reiSubjectMatch = reiBody && reiBody.match(/(神谷|黒崎|アオイ|橘|鬼塚)は/);
+  if (reiSubjectMatch) {
+    warnings.push(warn(19, '秘書室長所見に部署名・個人名を主語にした要約文が残っています',
+      ['検出', [reiSubjectMatch[0]]],
+    ));
+  }
+
+  // ── Rule 20: 鬼塚ガイの3部署コメント網羅 ─────────────────────
+  // その日実際に登場した部署（recs）についてのみ、審査コメントが揃っているかを確認する。
+  const activeRecDepts = new Set((recs ?? []).map(r => r.department));
+  const gaiBody = extractDeptBody(DEPT_HEADERS.gai.pattern);
+  if (gaiBody) {
+    const missing = [];
+    if (activeRecDepts.has('マーケット分析部') && !/神谷の/.test(gaiBody)) missing.push('神谷の〜については');
+    if (activeRecDepts.has('リスク管理部') && !/黒崎の/.test(gaiBody)) missing.push('黒崎の〜については');
+    if (activeRecDepts.has('ポートフォリオ管理部') && !/(アオイの|橘の)/.test(gaiBody)) missing.push('アオイの〜については');
+    if (missing.length > 0) {
+      warnings.push(warn(20, '鬼塚ガイの要約に、その日登場した部署への審査コメントが揃っていません',
+        ['不足', missing],
+      ));
+    }
+  }
+
+  // ── Rule 21: 橘アオイの規定書き出し ──────────────────────────
+  const aoiBody = extractDeptBody(DEPT_HEADERS.aoi.pattern);
+  if (aoiBody) {
+    const aoiSummaryMatch = aoiBody.match(/要約[：:]\s*([\s\S]*)/);
+    if (aoiSummaryMatch && !/^AI Capital模擬ファンドは現在[\d.]+%現金状態です/.test(aoiSummaryMatch[1].trim())) {
+      warnings.push(warn(21, '橘アオイの要約が規定の書き出し（「AI Capital模擬ファンドは現在○○%現金状態です」）で始まっていません'));
+    }
+  }
+
+  // ── Rule 22: 集中投資率の誇張表現 ────────────────────────────
+  // 低水準（<15%）の数値に対して「極めて高水準/危険/深刻」等の強い表現を使っていないか。
+  const EXAGGERATION_WORDS = /極めて(高水準|危険|深刻|大きい)/;
+  const misakiBody2 = extractDeptBody(DEPT_HEADERS.misaki.pattern);
+  for (const [name, body] of [['黒崎ミサキ', misakiBody2], ['橘アオイ', aoiBody]]) {
+    if (!body) continue;
+    const concMatch = body.match(/集中投資率[^\d]{0,4}([\d.]+)%/);
+    if (concMatch && parseFloat(concMatch[1]) < 15 && EXAGGERATION_WORDS.test(body)) {
+      warnings.push(warn(22, `${name}の要約が低水準の集中投資率（${concMatch[1]}%）に対して誇張表現を使っています`,
+        ['本文抜粋', [body.slice(0, 150)]],
+      ));
+    }
+  }
+
+  // ── Rule 23: 単一根拠による買付判断の禁止 ────────────────────
+  // 「今日の市場」＋「本日の買付候補」の本文を対象に、買付理由が単一指標だけに依存していないかを確認する。
+  if (isBuySignal) {
+    const marketBody     = extractSectionBody(note, [/🌍[^\n]*今日の市場/, /今日の市場/]);
+    const candidatesBody = extractSectionBody(note, [/🎯[^\n]*買付候補/, /本日の買付候補/]);
+    const rationaleText  = `${marketBody}\n${candidatesBody}`;
+
+    const EVIDENCE_CATEGORIES = {
+      'Fear & Greed':  /Fear\s*&\s*Greed/i,
+      'ATH乖離率':      /(ATH|高値)[^\n]{0,10}(下落|乖離|圏)|乖離率/,
+      'Rule Engine':   /(規則エンジン|Rule\s*Engine|推奨第1候補|スコア|Rank\s*\d|順位)/i,
+      '部署判断':      /(神谷|黒崎|アオイ|鬼塚|マーケット分析部|リスク管理部|ポートフォリオ管理部|審査部)/,
+      'Portfolio状況': /(集中投資率|ポートフォリオ比率|保有|現金比率)/,
+      'VIX':           /VIX/,
+      '市場データ':    /(前日比|NASDAQ|SOX|S&P\s*500|ドル円|ゴールド|変化率|反発率)/i,
+    };
+    const matchedEvidence = Object.entries(EVIDENCE_CATEGORIES)
+      .filter(([, re]) => re.test(rationaleText))
+      .map(([name]) => name);
+
+    if (rationaleText.trim().length > 0 && matchedEvidence.length < 2) {
+      warnings.push(warn(23, '買付理由が単一の根拠にしか依存していません（最低2項目の根拠が必要）',
+        ['検出した根拠', matchedEvidence.length ? matchedEvidence : ['（検出なし）']],
+        ['対象本文',     [rationaleText.replace(/\s+/g, ' ').slice(0, 200)]],
+      ));
+    }
+  }
+
+  // ── Rule 24: 数値と文章の整合性チェック（誇張表現） ──────────
+  // 実際の数値が低水準／通常範囲であるにもかかわらず、記事内で過度に強い評価表現が
+  // 使われていないかを確認する（対象: 現金比率・VIX・Fear&Greed・ATH乖離率・ポートフォリオ比率等）。
+  const STRONG_EXAGGERATION = /(暴落|崩壊的|壊滅的|パニック的|危機的|資金枯渇|極めて逼迫|深刻な資金不足|集中し過ぎ|非常に危険|著しく偏って|極めて(高水準|危険|深刻|大きい))/;
+
+  // VIX: 20未満は「平穏／通常レンジ」（constitution/investmentPhilosophy.vixCriteria）
+  const vixMatch = note.match(/VIX[：:]\s*([\d.]+)/);
+  if (vixMatch && parseFloat(vixMatch[1]) < 20) {
+    const idx = note.indexOf(vixMatch[0]);
+    const ctx = note.slice(Math.max(0, idx - 100), idx + 300);
+    if (STRONG_EXAGGERATION.test(ctx)) {
+      warnings.push(warn(24, `VIXが${vixMatch[1]}（平穏〜通常レンジ）にもかかわらず、誇張した評価表現が近傍に使われています`,
+        ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+      ));
+    }
+  }
+
+  // Fear & Greed: スコアが「極端な恐怖」（0〜25）でない場合に、パニック的な表現を使っていないか
+  const fgMatch = note.match(/Fear\s*&\s*Greed[：:]\s*([\d.]+)/);
+  if (fgMatch && parseFloat(fgMatch[1]) > 25) {
+    const idx = note.indexOf(fgMatch[0]);
+    const ctx = note.slice(Math.max(0, idx - 60), idx + 300);
+    if (/(パニック的|極端な恐怖状態|市場崩壊)/.test(ctx)) {
+      warnings.push(warn(24, `Fear & Greedが${fgMatch[1]}（極端な恐怖ではない）にもかかわらず、パニック的な表現が使われています`,
+        ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+      ));
+    }
+  }
+
+  // 現金比率: 値が高いほど資金余力があるため、資金逼迫を示唆する表現とは矛盾する
+  const cashRatioMatch = note.match(/現金比率[：:]\s*([\d.]+)%/);
+  if (cashRatioMatch && parseFloat(cashRatioMatch[1]) >= 50) {
+    const idx = note.indexOf(cashRatioMatch[0]);
+    const ctx = note.slice(Math.max(0, idx - 100), idx + 300);
+    if (/(資金枯渇|極めて逼迫|深刻な資金不足|資金が尽き)/.test(ctx)) {
+      warnings.push(warn(24, `現金比率が${cashRatioMatch[1]}%（余力あり）にもかかわらず、資金逼迫を示唆する表現が使われています`,
+        ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+      ));
+    }
+  }
+
+  // ATH乖離率: 絶対値が小さい（高値圏に近い）のに「暴落・崩壊」等の表現
+  for (const m of note.matchAll(/ATH乖離[^\d\-]{0,4}(-?[\d.]+)%/g)) {
+    if (Math.abs(parseFloat(m[1])) < 3) {
+      const ctx = note.slice(Math.max(0, m.index - 60), m.index + 200);
+      if (/(暴落|崩壊的|壊滅的)/.test(ctx)) {
+        warnings.push(warn(24, `ATH乖離率が${m[1]}%（高値圏に近い）にもかかわらず、暴落を示唆する表現が使われています`,
+          ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+        ));
+      }
+    }
+  }
+
+  // ポートフォリオ比率: 集中投資率と同じ考え方（低水準の数値に誇張表現が付いていないか）。集中投資率自体は Rule 22 が担当。
+  for (const m of note.matchAll(/ポートフォリオ比率[^\d]{0,4}([\d.]+)%/g)) {
+    if (parseFloat(m[1]) < 15) {
+      const ctx = note.slice(Math.max(0, m.index - 60), m.index + 200);
+      if (STRONG_EXAGGERATION.test(ctx)) {
+        warnings.push(warn(24, `ポートフォリオ比率が${m[1]}%（低水準）にもかかわらず、誇張した評価表現が使われています`,
+          ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+        ));
+      }
+    }
+  }
+
+  // ── Rule 25: 最終判断との意味的整合性チェック ────────────────
+  // 記事内の「様子見・見送り・保留」等の待機的表現と、「採用・買付を決定・観測ポジション構築」等の
+  // 実行的表現が、最終判断（BUY/ACCUMULATE/観測ポジション構築 vs WAIT）と矛盾していないかを確認する。
+  const WAIT_EXPRESSIONS   = /(様子見|買付を見送る|見送りとし|一旦保留|投資を控える|待機(?:とし|する|します|とします)|全社的に見送り)/;
+  const EXECUTE_EXPRESSIONS = /(採用しました|採用します|買付を決定しました|買付を決定します|観測ポジションを構築します|観測ポジションを構築しました)/;
+
+  const isWaitSignal = finalSignal === 'WAIT';
+
+  if (isBuySignal) {
+    const waitMatches = note.match(new RegExp(WAIT_EXPRESSIONS, 'g'));
+    if (waitMatches && waitMatches.length > 0) {
+      const idx = note.search(WAIT_EXPRESSIONS);
+      const ctx = note.slice(Math.max(0, idx - 100), idx + 200);
+      warnings.push(warn(25, `最終判断が${finalSignal}（買付実行）にもかかわらず、記事内に様子見・見送りを示す表現が含まれています`,
+        ['検出表現', [...new Set(waitMatches)]],
+        ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+      ));
+    }
+  }
+
+  if (isWaitSignal) {
+    const execMatches = note.match(new RegExp(EXECUTE_EXPRESSIONS, 'g'));
+    if (execMatches && execMatches.length > 0) {
+      const idx = note.search(EXECUTE_EXPRESSIONS);
+      const ctx = note.slice(Math.max(0, idx - 100), idx + 200);
+      warnings.push(warn(25, `最終判断がWAIT（見送り）にもかかわらず、記事内に買付・観測ポジション構築の実行を示す表現が含まれています`,
+        ['検出表現', [...new Set(execMatches)]],
+        ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
+      ));
+    }
+  }
+
+  // ── Rule 26: 箇条書き記号統一（・以外のマーカー残留） ─────────
+  const strayBullets = noteLines
+    .map((l, i) => ({ lineNum: i + 1, text: l }))
+    .filter(({ text }) => /^[ \t]*[\-\*•‣▪○●][ \t]/.test(text));
+  if (strayBullets.length > 0) {
+    warnings.push(warn(26, '箇条書きに「・」以外の記号が残っています',
+      ['検出', strayBullets.slice(0, 3).map(({ lineNum, text }) => `行 ${lineNum}: ${text.trim().slice(0, 30)}`)],
+    ));
+  }
+
+  // ── Rule 27: 判断／信頼度／要約／推奨ラベルの改行崩れ ──────────
+  // 前の文が句点・閉じ括弧で終わった直後にラベルが同一行で続いている＝改行が消失した典型パターン
+  {
+    const labelReflowRe = /[。」）][ \t]*(判断|信頼度|要約|推奨)[：:]/;
+    const m = note.match(labelReflowRe);
+    if (m) {
+      const idx = note.indexOf(m[0]);
+      const ctx = note.slice(Math.max(0, idx - 20), idx + 30).replace(/\n/g, '⏎');
+      warnings.push(warn(27, `「${m[1]}：」の前で改行が消失し、前の文と同じ行に混在しています`,
+        ['検出箇所', [ctx]],
+      ));
+    }
+  }
+
+  // ── Rule 28: 意味の重複（同一文の重複出現） ────────────────────
+  {
+    const sentences = noteLines
+      .flatMap(l => l.split(/(?<=。)/))
+      .map(s => s.trim())
+      .filter(s => s.length >= 20);
+    const counts = new Map();
+    for (const s of sentences) counts.set(s, (counts.get(s) ?? 0) + 1);
+    const dup = [...counts.entries()].find(([, c]) => c >= 2);
+    if (dup) {
+      warnings.push(warn(28, '同一の文が記事内に重複して出現しています',
+        ['重複文', [dup[0].slice(0, 80)]],
+        ['出現回数', [`${dup[1]}回`]],
+      ));
+    }
+  }
+
+  // ── Rule 29: 句読点不足（長文の句読点欠落） ────────────────────
+  {
+    const longRunOn = noteLines
+      .map((l, i) => ({ lineNum: i + 1, text: l.trim() }))
+      .find(({ text }) =>
+        text.length > 120 &&
+        !/[。、]/.test(text) &&
+        !/^[^\s：:]{1,20}[：:]/.test(text)
+      );
+    if (longRunOn) {
+      warnings.push(warn(29, '句読点のない長文（100文字超）が検出されました',
+        ['行番号', [`行 ${longRunOn.lineNum}`]],
+        ['内容',   [`${longRunOn.text.slice(0, 80)}...`]],
+      ));
+    }
+  }
+
+  // ── Rule 30: 見出し直後の空行欠落（見出し→空行→本文の形式） ────
+  // 💰（データをそのまま転記・空行禁止）と🔴（箇条書きが見出し直下に密着する仕様）は
+  // 意図的に空行なしの設計のため対象外とする。
+  {
+    const HEADING_BLANK_SECTIONS = [
+      { name: '今日の見どころ', patterns: [/📌[^\n]*今日の見どころ/, /今日の見どころ/] },
+      { name: '今日の市場',     patterns: [/🌍[^\n]*今日の市場/, /今日の市場/] },
+      { name: '本日の買付候補', patterns: [/🎯[^\n]*買付候補/, /本日の買付候補/] },
+      { name: '各部署の判断',   patterns: [/🏢[^\n]*(?:部署|判断)/, /各部署の判断/] },
+      { name: '最終判断',       patterns: [/⚖️[^\n]*最終判断/, /最終判断/] },
+      { name: '次回の注目点',   patterns: [/👀[^\n]*注目点/, /次回の注目点/] },
+      { name: '秘書室長所見',   patterns: [/👑[^\n]*秘書室長/, /秘書室長所見/] },
+    ];
+    for (const sec of HEADING_BLANK_SECTIONS) {
+      let headerLineIdx = -1;
+      for (const pat of sec.patterns) {
+        const idx = noteLines.findIndex(l => pat.test(l));
+        if (idx >= 0) { headerLineIdx = idx; break; }
+      }
+      if (headerLineIdx < 0) continue; // 未検出はRule10が既に警告する
+
+      const nextLine = noteLines[headerLineIdx + 1];
+      if (nextLine !== undefined && nextLine.trim() !== '') {
+        warnings.push(warn(30, '見出し直後に空行がなく、本文と密着しています',
+          ['セクション', [sec.name]],
+          ['直後の内容', [nextLine.slice(0, 40)]],
+        ));
+      }
+    }
+  }
+
+  // ── Rule 31: 許可されていない見出し絵文字 ──────────────────────
+  // 単独行で「絵文字＋短い見出し語」の形をしている行のみを対象とする（本文中の絵文字は対象外）。
+  {
+    const ALLOWED_HEADING_EMOJI = new Set([
+      '📊', '📋', '📌', '🌍', '🎯', '🏢', '⚖️', '🔴', '💰', '👀', '👑',
+      '😎', '🤨', '🙂', '🧐', '😨', '📉', '⚠️', '💵',
+    ]);
+    const headingLike = noteLines
+      .map((l, i) => ({ lineNum: i + 1, text: l.trim() }))
+      .filter(({ text }) => {
+        const m = text.match(/^(\p{Extended_Pictographic}️?)\s*(.*)$/u);
+        if (!m) return false;
+        const [, emoji, rest] = m;
+        if (ALLOWED_HEADING_EMOJI.has(emoji)) return false;
+        return rest.length > 0 && rest.length <= 20 && !/[。、]/.test(rest);
+      });
+    if (headingLike.length > 0) {
+      warnings.push(warn(31, '許可されていない絵文字が見出し形式で使われています',
+        ['検出', headingLike.slice(0, 3).map(({ lineNum, text }) => `行 ${lineNum}: ${text.slice(0, 20)}`)],
       ));
     }
   }

@@ -118,4 +118,9 @@ async function replaceSheet(sheetName, headers, rows) {
   }
 }
 
-module.exports = { getRows, getRowsByDate, getRowsByDateRange, getLatestRow, getLatestRowAsOf, appendRow, upsertRow, replaceSheet, post };
+// ── シート全行削除（ヘッダー行は残す） ─────────────────────
+async function clearSheet(sheetName) {
+  return post({ action: 'clear_sheet', sheet: sheetName });
+}
+
+module.exports = { getRows, getRowsByDate, getRowsByDateRange, getLatestRow, getLatestRowAsOf, appendRow, upsertRow, replaceSheet, clearSheet, post };

@@ -4,56 +4,92 @@
  * development.js — 開発ログエージェント
  *
  * 目的:
- *   AI Capital の開発履歴を時系列で記録する。
- *   日刊・週刊・月刊・四半期と同じ { log, meta } インターフェースで統一。
+ *   AI Capital の開発履歴を時系列で記録する。人手で saveDevelopmentLog() を
+ *   呼ぶ運用は前提にしない — scripts/auto-devlog.js が git の post-commit フックから
+ *   自動で呼び出す（詳細は同ファイルとリポジトリルートの .git/hooks/post-commit を参照）。
+ *   このファイルは「保存先のスキーマとルール」を定義する場所であり、
+ *   「いつ何を記録するか」の判断は lib/changeClassifier.js が担う。
  *
- * 現時点の実装範囲:
- *   - logId / buildDevelopmentMeta / buildDevelopmentLog のインターフェース定義
- *   - development_logs シートへの保存（sheets.appendRow）
- *   - 初回ログデータの定義（PHASE1_COMPLETION）
+ * development_logs シートの列:
+ *   log_id | date | type | title | summary | affected_files | reason |
+ *   impact | breaking_change | version | status | system_version | created_at
  *
- * 未実装（将来: 有効化時に追加）:
- *   - Git コミット風タイムライン生成
- *   - 開発年表 / Version History ページ生成
- *   - note.com 開発秘話記事の自動生成
- *   - 変更履歴の自動生成（git log 連携）
- *   - publisher.js / scheduler.js への組み込み
- *   - 開発ダッシュボード表示
+ *   type            - MAJOR_EVENT_TYPES のいずれか、または 'OTHER'
+ *   affected_files  - 変更されたファイル一覧（カンマ区切り）
+ *   reason          - なぜその変更をしたか（コミット本文、無ければ自動検出ルールの説明）
+ *   impact          - 'high' | 'medium' | 'low'（コアファイルへの重大変更ほど高い）
+ *   breaking_change - 既存ロジックを置き換える破壊的変更かどうか（真偽値）
+ *   version         - この変更が反映された時点の AI Capital バージョン（lib/systemVersion.js）
+ *   status          - 'auto_detected'（自動検出） | 'manual'（人が明示的に記録）
  */
 
 const sheets = require('../lib/sheets');
 const crypto = require('crypto');
 
-// ── フェーズ定数 ─────────────────────────────────────────────
-// 将来の phase 追加はここへ追記するだけで対応可能（switch 不要）。
+// ── システムバージョン表示ラベル ────────────────────────────────
+// 実際のバージョン番号の正本は config/systemVersion.json（lib/systemVersion.js が管理）。
+// development_logs の system_version 列には「どのシステム世代のログか」という
+// 大分類（AI Capital V2）を書く。細かいバージョン番号は version 列で管理する。
 
-const PHASES = {
-  PHASE1:         'Phase 1',
-  PHASE2:         'Phase 2',
-  PHASE3:         'Phase 3',
-  BUG_FIX:        'Bug Fix',
-  REFACTOR:       'Refactor',
-  INFRASTRUCTURE: 'Infrastructure',
+const SYSTEM_VERSION = 'AI Capital V2';
+
+// ── Weekly記事へ自動反映される「重大イベント」カテゴリ ────────────
+//
+// lib/changeClassifier.js が git diff からこれらのキーのいずれかに分類すると、
+// scripts/auto-devlog.js が development_logs へ記録すると同時に
+// lib/systemVersion.bumpMinor() でバージョンを上げ、lib/changelog.js で
+// CHANGELOG.md を更新する。分類できない変更は type: 'OTHER' として記録される
+// （バージョンは上げず、CHANGELOGにも載せない — development_logs内の監査証跡のみ）。
+//
+// agents/weekly.js の週刊記事はこの development_logs を参照し、①②⑧⑩へ自動反映する。
+// 人がこの定数へ触れる必要があるのは「新しいイベント種別を追加したい時」だけであり、
+// 通常運用でここを編集する必要はない。
+const MAJOR_EVENT_TYPES = {
+  PHILOSOPHY:   '投資哲学変更',
+  RULE_ENGINE:  'Rule Engine変更',
+  EVAL_LOGIC:   '評価ロジック変更',
+  VALIDATOR:    'Validator追加',
+  NEW_ASSET:    '候補資産追加',
+  NEW_DEPT:     '部署追加',
+  NEW_STAFF:    'AI社員追加',
+  MAJOR_BUGFIX: '重大バグ修正',
+  MAJOR_EVENT:  '大型イベント',
 };
+
+const MAJOR_EVENT_TYPE_VALUES = Object.values(MAJOR_EVENT_TYPES);
+
+/**
+ * development_logs の type 値が「Weekly記事へ自動反映すべき重大イベント」か判定する
+ * @param {string} type
+ * @returns {boolean}
+ */
+function isMajorEvent(type) {
+  return MAJOR_EVENT_TYPE_VALUES.includes(type);
+}
 
 // ── ステータス定数 ────────────────────────────────────────────
 
 const STATUS = {
-  COMPLETED:   'completed',
-  IN_PROGRESS: 'in_progress',
-  PLANNED:     'planned',
+  AUTO_DETECTED: 'auto_detected', // scripts/auto-devlog.js による自動記録（コード変更）
+  MANUAL:        'manual',        // 人・AIエージェントが明示的に記録した過去分
+  AUTO_QUALITY:  'auto_quality',  // publisher.js の品質改善ループ/編集長レビューによる自動記録（記事品質。Phase4）
 };
 
-// ── システムバージョン（capitalEvents と同じ定数を再定義して独立性を保つ）──
+// ── 記事品質イベント種別（Weekly自動反映の対象外・development_logsの監査証跡専用） ──
+// MAJOR_EVENT_TYPESとは異なり、これらはコード変更ではなく記事品質の変化を記録する。
+// isMajorEvent()の対象に含めないため、バージョン更新・CHANGELOG反映・Weekly本文への
+// 自動転記は発生しない（agents/weekly.jsの品質セクションはquality_scoresを直接参照する）。
+const QUALITY_EVENT_TYPES = {
+  QUALITY_IMPROVEMENT: 'QUALITY_IMPROVEMENT', // 前回記録比でtotal_scoreが向上
+  EDITOR_REJECTION:     'EDITOR_REJECTION',    // AI編集長が「公開を推奨しません」と判定
+};
 
-const SYSTEM_VERSION = 'AI Capital V2';
+// ── 初回ログデータ（このシステム自体の記録は手動記録として残す） ────
 
-// ── 初回ログデータ ────────────────────────────────────────────
-
-const PHASE1_COMPLETION = {
-  phase:          PHASES.PHASE1,
-  title:          'Phase 1 完了・正式運用開始',
-  summary:        [
+const BOOTSTRAP_LOG = {
+  type:            MAJOR_EVENT_TYPES.MAJOR_EVENT,
+  title:           'Phase 1 完了・正式運用開始',
+  summary:         [
     'AI社員会議システム完成',
     '日刊記事生成完成',
     'X投稿生成完成',
@@ -63,9 +99,11 @@ const PHASE1_COMPLETION = {
     'アーカイブ機能の土台完成',
     '正式運用フェーズへ移行',
   ].join(' / '),
-  changes:        'capital_events, development_logs, archives, weekly_articles, monthly_articles, quarterly_articles シート追加',
-  status:         STATUS.COMPLETED,
-  system_version: SYSTEM_VERSION,
+  affected_files:  'capital_events, development_logs, archives, weekly_articles, monthly_articles, quarterly_articles',
+  reason:          '正式運用フェーズへの移行に伴うデータ基盤整備',
+  impact:          'high',
+  breaking_change: false,
+  status:          STATUS.MANUAL,
 };
 
 // ── ユーティリティ ────────────────────────────────────────────
@@ -89,11 +127,9 @@ function nowJSTTimestamp() {
 /**
  * 開発ログのメタデータを生成する
  * @param {object} fields
- * @param {string} fields.phase          - PHASES 定数を使用
- * @param {string} fields.title          - ログタイトル
- * @param {string} fields.status         - STATUS 定数を使用
  * @param {string} [fields.date]         - YYYY-MM-DD（省略時は当日JST）
  * @param {string} [fields.log_id]       - 省略時は自動生成
+ * @param {string} [fields.status]       - STATUS 定数を使用（省略時は STATUS.MANUAL）
  * @param {string} [fields.system_version]
  * @returns {object}
  */
@@ -101,9 +137,7 @@ function buildDevelopmentMeta(fields) {
   return {
     log_id:         fields.log_id         ?? generateLogId(),
     date:           fields.date           ?? todayJST(),
-    phase:          fields.phase          ?? PHASES.PHASE1,
-    title:          fields.title          ?? '',
-    status:         fields.status         ?? STATUS.COMPLETED,
+    status:         fields.status         ?? STATUS.MANUAL,
     system_version: fields.system_version ?? SYSTEM_VERSION,
     created_at:     fields.created_at     ?? nowJSTTimestamp(),
   };
@@ -112,32 +146,32 @@ function buildDevelopmentMeta(fields) {
 // ── メイン ────────────────────────────────────────────────────
 
 /**
- * 開発ログを組み立てる
- * 他レポートとの統一インターフェース: { log, meta }
- *
- * 将来の使用例:
- *   const { log, meta } = await buildDevelopmentLog(PHASE1_COMPLETION, '2026-06-28');
- *   await sheets.appendRow('development_logs', { ...meta, summary: log.summary, changes: log.changes });
- *
- * @param {object} fields - PHASE1_COMPLETION などのログデータオブジェクト
+ * 開発ログを組み立てる（{ log, meta } の統一インターフェース）
+ * @param {object} fields - type/title/summary/affected_files/reason/impact/breaking_change/version
  * @param {string} [date] - YYYY-MM-DD（省略時は当日JST）
- * @returns {{ log: object, meta: object }}
+ * @returns {Promise<{ log: object, meta: object }>}
  */
 async function buildDevelopmentLog(fields, date) {
   const meta = buildDevelopmentMeta({ ...fields, date: date ?? fields.date ?? todayJST() });
 
   const log = {
-    summary: fields.summary ?? '',
-    changes: fields.changes ?? '',
+    type:            fields.type            ?? 'OTHER',
+    title:           fields.title           ?? '',
+    summary:         fields.summary         ?? '',
+    affected_files:  fields.affected_files  ?? '',
+    reason:          fields.reason          ?? '',
+    impact:          fields.impact          ?? 'low',
+    breaking_change: fields.breaking_change ?? false,
+    version:         fields.version         ?? '',
   };
 
   return { log, meta };
 }
 
 /**
- * 開発ログを development_logs シートへ保存する
- *
- * TODO: 将来は publisher.js や特定のスラッシュコマンドから呼ぶ
+ * 開発ログを development_logs シートへ保存する。
+ * scripts/auto-devlog.js（git post-commitフック経由）から自動的に呼ばれるのが標準経路。
+ * 過去分の手動登録や、フックが使えない環境での補完記録にも使える。
  *
  * @param {object} fields - ログデータ
  * @param {string} [date] - YYYY-MM-DD
@@ -147,29 +181,35 @@ async function saveDevelopmentLog(fields, date) {
   const { log, meta } = await buildDevelopmentLog(fields, date);
 
   await sheets.appendRow('development_logs', {
-    log_id:         meta.log_id,
-    date:           meta.date,
-    phase:          meta.phase,
-    title:          meta.title,
-    summary:        log.summary,
-    changes:        log.changes,
-    status:         meta.status,
-    system_version: meta.system_version,
-    created_at:     meta.created_at,
+    log_id:          meta.log_id,
+    date:            meta.date,
+    type:            log.type,
+    title:           log.title,
+    summary:         log.summary,
+    affected_files:  log.affected_files,
+    reason:          log.reason,
+    impact:          log.impact,
+    breaking_change: String(log.breaking_change),
+    version:         log.version,
+    status:          meta.status,
+    system_version:  meta.system_version,
+    created_at:      meta.created_at,
   });
 
-  console.log(`[development] 開発ログ保存: ${meta.log_id} [${meta.phase}] ${meta.title}`);
+  console.log(`[development] 開発ログ保存: ${meta.log_id} [${log.type}] ${log.title}`);
   return { log, meta };
 }
 
 // ── エクスポート ──────────────────────────────────────────────
 
 module.exports = {
-  PHASES,
   STATUS,
   SYSTEM_VERSION,
-  PHASE1_COMPLETION,
+  MAJOR_EVENT_TYPES,
+  QUALITY_EVENT_TYPES,
+  BOOTSTRAP_LOG,
   buildDevelopmentMeta,
   buildDevelopmentLog,
   saveDevelopmentLog,
+  isMajorEvent,
 };

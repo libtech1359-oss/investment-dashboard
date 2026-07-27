@@ -167,4 +167,69 @@ async function getRecentOrders(n = 10) {
   return rows.sort((a, b) => b.date.localeCompare(a.date)).slice(0, n);
 }
 
-module.exports = { processSignal, updateStatus, getRecentOrders, autoFillPendingOrders };
+// ── 売却注文記録（財務戦略部 REDUCE/SELL用。現在未配線）───────
+// finalDecision.final_signal が REDUCE または SELL の場合に orders へ status='sold' で記録する。
+// amount の意味は買い注文と同じ「取得原価相当額」（時価ではない）。
+//   REDUCE: 指定額（保有原価を超える場合は保有原価にクランプ）
+//   SELL:   対象銘柄の保有原価全額（amount引数は無視）
+// dataFetcher.updatePortfolioStatus() が次回実行時にFIFOで消費し、実現損益・現金へ反映する。
+async function processSellSignal(finalDecision) {
+  if (!finalDecision) return null;
+  const { final_signal, target_asset, amount, date } = finalDecision;
+
+  if (!['REDUCE', 'SELL'].includes(final_signal)) {
+    console.log(`[orderManager] 売却不要: ${final_signal}`);
+    return null;
+  }
+  if (!target_asset) {
+    console.log('[orderManager] 売却スキップ: 銘柄未定');
+    return null;
+  }
+
+  const runDate = date ?? todayJST();
+
+  const pf = await sheets.getLatestRow('portfolio_status').catch(() => null);
+  if (!pf) {
+    console.warn('[orderManager] portfolio_status 未取得 — 売却を中止');
+    return null;
+  }
+  const positions = JSON.parse(pf.positions_json || '[]');
+  const holding = positions.find(p => p.name === target_asset);
+  const currentCostBasis = parseInt(holding?.cost_basis || 0, 10);
+  if (currentCostBasis <= 0) {
+    console.warn(`[orderManager] 売却スキップ: ${target_asset} を保有していません`);
+    return null;
+  }
+
+  const sellAmount = final_signal === 'SELL'
+    ? currentCostBasis
+    : Math.min(parseInt(amount || 0, 10), currentCostBasis);
+
+  if (sellAmount < 1000) {
+    console.log(`[orderManager] 売却スキップ: amount不足 (${target_asset} ¥${sellAmount})`);
+    return null;
+  }
+
+  // 同日・同銘柄の重複売却チェック
+  const existing = await sheets.getRowsByDate('orders', runDate);
+  const dup = existing.find(o => o.asset_name === target_asset && o.status === 'sold');
+  if (dup) {
+    console.log(`[orderManager] 重複売却スキップ: ${target_asset} (既存注文ID: ${dup.order_id})`);
+    return dup;
+  }
+
+  const order = {
+    order_id:   generateOrderId(),
+    date:       runDate,
+    asset_name: target_asset,
+    amount:     String(sellAmount),
+    status:     'sold',
+  };
+
+  await sheets.appendRow('orders', order);
+  console.log(`[orderManager] 売却記録: ${order.order_id} ${order.asset_name} ¥${sellAmount.toLocaleString()} (${final_signal})`);
+
+  return order;
+}
+
+module.exports = { processSignal, processSellSignal, updateStatus, getRecentOrders, autoFillPendingOrders };

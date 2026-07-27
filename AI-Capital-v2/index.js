@@ -27,6 +27,7 @@ const scheduler   = require('./scheduler');
 const secretary   = require('./secretary');
 const sheets      = require('./lib/sheets');
 const orderManager = require('./lib/orderManager');
+const health      = require('./lib/health');
 
 const { DISCORD_TOKEN, CEO_CHANNEL = 'ai-v2秘書' } = process.env;
 if (!DISCORD_TOKEN) { console.error('❌ DISCORD_TOKEN 未設定'); process.exit(1); }
@@ -70,7 +71,7 @@ async function handleV2Run(interaction) {
       result.order ? `**発注記録**: \`${result.order.order_id}\` ${result.order.asset_name} ¥${parseInt(result.order.amount).toLocaleString()}` : '発注: なし',
       '',
       result.article?.noteUrl ? `**note下書き**: ${result.article.noteUrl}` : '',
-      result.article ? `**X投稿候補**:\n${result.article.x.slice(0, 280)}` : '',
+      result.article ? `**X投稿候補**:\n${result.article.x}` : '',
     ].filter(l => l !== undefined);
 
     await interaction.editReply(lines.join('\n').slice(0, 1900));
@@ -197,6 +198,18 @@ client.once('clientReady', () => {
   else console.log(`⚠️ チャンネル "${CEO_CHANNEL}" が見つかりません`);
 
   scheduler.init(client, reportChannel);
+
+  // ── ハートビート（watchdog.js が監視） ─────────────────────
+  const heartbeatTick = () => health.writeHeartbeat({
+    discordStatus: client.isReady() ? 'connected' : 'disconnected',
+  });
+  heartbeatTick();
+  setInterval(heartbeatTick, 2 * 60 * 1000);
+
+  client.on('shardDisconnect',   () => health.writeHeartbeat({ discordStatus: 'disconnected' }));
+  client.on('shardReconnecting', () => health.writeHeartbeat({ discordStatus: 'reconnecting' }));
+  client.on('shardResume',       () => health.writeHeartbeat({ discordStatus: 'connected' }));
+  client.on('shardError',        () => health.writeHeartbeat({ discordStatus: 'error' }));
 });
 
 client.on('interactionCreate', async interaction => {

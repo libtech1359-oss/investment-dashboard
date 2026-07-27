@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const SESSION_FILE = path.join(__dirname, 'data/note_session.json');
-const DRAFT_URL = 'https://editor.note.com/notes/nc81d93879580/edit/';
+const DRAFT_URL = 'https://editor.note.com/notes/na1b45dc81617/edit/';
 
 (async () => {
   const browser = await chromium.launch({ headless: true });

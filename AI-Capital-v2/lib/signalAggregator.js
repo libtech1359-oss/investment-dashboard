@@ -22,7 +22,8 @@
  *
  * 銘柄選択ロジック（部署の議論を中心に、客観指標・ポートフォリオ全体最適化は「補正」として加える構造）:
  *   voteScore（部署の信頼度加重支持率, 0〜1）を基礎スコアとし、
- *   + ruleAdjust（Rule Engine: ATH乖離ランク・Fear&Greed・VIX）
+ *   + ruleAdjust（Rule Engine: candidate_assetsの総合評価スコアランク。VIXが高いほど発言力を弱める。
+ *     Fear&Greedは全銘柄共通の値のため銘柄間の相対順位を左右せず、この補正には使わない）
  *   + holdingRatioAdjust（① 保有比率が高いほど連続的に減点。集中投資の抑制）
  *   + allocationAdjust（② config/targetAllocation.js の目標配分との乖離。不足なら加点・超過なら減点）
  *   + cooldownAdjust（③ 直近の連続購入を減点。ただしRule Engineが強い日は無効化される）
@@ -170,12 +171,10 @@ async function run(date) {
         const totalAssets  = pf ? parseFloat(pf.total_assets ?? 0) : 0;
         const positions    = pf ? safeParseJson(pf.positions_json, []) : [];
 
-        // Rule Engineの発言力を市場状況で調整（Fear&Greedが恐怖圏に近いほど強く、VIXが高いほど弱く）
-        const fearGreed = mkt ? parseFloat(mkt.fear_greed ?? 50) : 50;
+        // Rule Engineの発言力を市場状況で調整（VIXが高い＝不確実性が高いほど弱める）。
+        // Fear & Greedは市場心理を表す一つの評価項目であり、Rule Engine補正の方向・強度を
+        // 左右する指標としては使わない（総合評価原則：単一指標が結論を支配しない）。
         const vix       = mkt ? parseFloat(mkt.vix ?? 20) : 20;
-        const fgIntensity = fearGreed <= 25 ? W.RULE_ENGINE_FG_INTENSITY.extreme
-                          : fearGreed <= 45 ? W.RULE_ENGINE_FG_INTENSITY.fear
-                          : W.RULE_ENGINE_FG_INTENSITY.neutral;
         const vixDamp      = vix >= 30 ? W.RULE_ENGINE_VIX_DAMP.high
                           : vix >= 20 ? W.RULE_ENGINE_VIX_DAMP.elevated
                           : W.RULE_ENGINE_VIX_DAMP.normal;
@@ -203,7 +202,7 @@ async function run(date) {
           const matchedRecs = validRecs.filter(r => matchAsset(r.asset_name, c));
           const voteScore   = matchedRecs.reduce((s, r) => s + (parseFloat(r.confidence) || 50) / 100, 0) / totalConfWeight;
 
-          const ruleAdjust = (rankScore - 0.5) * 2 * W.RULE_ENGINE_MAX_ADJUST * fgIntensity * vixDamp;
+          const ruleAdjust = (rankScore - 0.5) * 2 * W.RULE_ENGINE_MAX_ADJUST * vixDamp;
 
           // ① 保有比率: 保有比率(0〜100%)に比例して連続的に減点する
           const held = positions.find(p => (p.name || p.asset_name) === c.asset_name);
@@ -233,7 +232,7 @@ async function run(date) {
             if (daysSince >= 0 && daysSince < W.RECENT_PURCHASE_COOLDOWN_DAYS) {
               const decay = 1 - daysSince / W.RECENT_PURCHASE_COOLDOWN_DAYS;
               cooldownAdjust = -decay * W.RECENT_PURCHASE_MAX_PENALTY;
-              const todayMaxRuleAdjust = W.RULE_ENGINE_MAX_ADJUST * fgIntensity * vixDamp;
+              const todayMaxRuleAdjust = W.RULE_ENGINE_MAX_ADJUST * vixDamp;
               const ruleStrength = todayMaxRuleAdjust > 0 ? Math.max(0, ruleAdjust) / todayMaxRuleAdjust : 0;
               if (ruleStrength >= W.RECENT_PURCHASE_OVERRIDE_RULE_RATIO) cooldownAdjust = 0;
             }
@@ -263,7 +262,7 @@ async function run(date) {
         const top3 = scored.slice(0, 3)
           .map(s => `${s.asset_name}(combined=${s.combined.toFixed(3)} vote=${s.voteScore.toFixed(3)} rule=${s.ruleAdjust>=0?'+':''}${s.ruleAdjust.toFixed(3)} hold=${s.holdingRatioAdjust.toFixed(3)} alloc=${s.allocationAdjust>=0?'+':''}${s.allocationAdjust.toFixed(3)}(目標${s.targetAllocPct}%/現在${s.currentAllocPct.toFixed(1)}%) cooldown=${s.cooldownAdjust.toFixed(3)} order=+${s.orderAssist.toFixed(3)} n=${s.deptCount})`)
           .join(' / ');
-        console.log(`[signalAggregator] 銘柄スコア上位3: ${top3} (FG強度=${fgIntensity} VIX減衰=${vixDamp})`);
+        console.log(`[signalAggregator] 銘柄スコア上位3: ${top3} (VIX減衰=${vixDamp})`);
 
         // 説明可能性（Explainability）: 読者向けに内部スコア・信頼度・部署一覧などの
         // デバッグ情報を含めず、平易な日本語で理由を1〜2文にまとめる。

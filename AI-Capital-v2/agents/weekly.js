@@ -6,7 +6,7 @@
  * 日刊記事の単純な集約ではなく、「AI Capitalが1週間をどう分析し、
  * どう判断し、何を学んだか」を伝える記事を組み立てる。
  *
- * 構成（V1.4・14セクション）:
+ * 構成（V1.5・15セクション）:
  *   ① 今週の総括（LLM・30秒で伝わる文章）
  *   ② 今週のトピック（機械生成・3〜5項目）
  *   ③ 今週のマーケット振り返り（機械生成 + 推移チャート）
@@ -21,14 +21,30 @@
  *   ⑫ 今週の一言（名言）（LLM・発言者/発言内容/一言解説の3行、担当は毎週変動）
  *   ⑬ 来週のAI Capital会議テーマ（LLM）
  *   ⑭ 次号予告（LLM・読者向けteaser）
+ *   ⑮ 今週の記事品質（機械生成・quality_scores参照・日次スコア/前週比改善項目/4週間推移。Phase4）
+ *
+ * 章構成は WEEKLY_SECTIONS（本ファイル下部）が単一の正本。毎週この順序・
+ * 章数のまま「固定テンプレート＋可変データ（gatherWeeklyDataが集めるその週のデータ）」
+ * で生成するため、通常運用が続く限りプロンプトの手直しは不要。
+ *
+ * 重大イベントの自動反映（人手のログ記録に依存しない）:
+ *   投資哲学変更・Rule Engine変更・評価ロジック変更・Validator追加・候補資産追加・
+ *   部署追加・AI社員追加・重大バグ修正・大型イベントは、コード変更のコミット時に
+ *   git の post-commit フック（scripts/auto-devlog.js）が diff を解析して自動分類し、
+ *   development_logs への記録・バージョン更新（lib/systemVersion.js）・
+ *   CHANGELOG.md の更新までを人手を介さず行う。誰かが saveDevelopmentLog() を
+ *   書き忘れても記録は残る（分類できない変更は type:'OTHER' として記録され、
+ *   Weekly記事へは反映されない＝通常運用として扱われる）。
+ *   weekly.js はその結果（development_logs）を読むだけで、①②⑧⑩へ自動反映する。
  *
  * サムネイル: 日刊用と異なり、固定ファイル data/weekly_assets/週刊サムネ.png を使用する。
  *
  * 手動実行: node _run_weekly.js YYYY-MM-DD YYYY-MM-DD
  */
 
-const sheets  = require('../lib/sheets');
-const { ask } = require('../lib/ollama');
+const sheets      = require('../lib/sheets');
+const { ask }     = require('../lib/ollama');
+const development = require('./development');
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -98,6 +114,7 @@ async function gatherWeeklyData(startDate, endDate) {
     pfThisWeek,
     pfPrevWeek,
     positionRows,
+    devLogRows,
   ] = await Promise.all([
     sheets.getRowsByDateRange('market_data',          startDate, endDate).catch(() => []),
     sheets.getRowsByDateRange('agent_votes',           startDate, endDate).catch(() => []),
@@ -107,7 +124,12 @@ async function gatherWeeklyData(startDate, endDate) {
     sheets.getLatestRowAsOf('portfolio_status', endDate).catch(() => null),
     sheets.getLatestRowAsOf('portfolio_status', dayBefore(startDate)).catch(() => null),
     sheets.getRows('positions').catch(() => []),
+    sheets.getRowsByDateRange('development_logs',      startDate, endDate).catch(() => []),
   ]);
+
+  const majorEvents = devLogRows
+    .filter(r => development.isMajorEvent(r.type))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
 
   return {
     period:        { start: startDate, end: endDate, days: marketRows.length },
@@ -121,7 +143,32 @@ async function gatherWeeklyData(startDate, endDate) {
     portfolioPrev: pfPrevWeek,
     positions:     positionRows,
     latestMarket:  marketRows[marketRows.length - 1] ?? null,
+    majorEvents,
   };
+}
+
+// ── 重大イベント（development_logs由来。git post-commitフックによる自動記録） ─
+//
+// その週に development.MAJOR_EVENT_TYPES 該当のログが1件でもあれば、
+// weekContextText() 経由で全LLMセクションのcontextへ差し込まれる。
+// ①総括・⑧学んだこと・⑩秘書室長週報のシステムプロンプトは、この項目がcontextに
+// 存在する場合のみ必ず言及するよう固定文で指示済み（週ごとの手直し不要）。
+function majorEventsContextText(events) {
+  if (!events || events.length === 0) return null;
+  return events.map(e => {
+    const flags = [];
+    if (e.impact)                                    flags.push(`影響度:${e.impact}`);
+    if (String(e.breaking_change).toLowerCase() === 'true') flags.push('破壊的変更');
+    if (e.version)                                   flags.push(`更新後バージョン:${e.version}`);
+    const flagText = flags.length ? `（${flags.join(' / ')}）` : '';
+    return `${e.date} [${e.type}] ${e.title}：${e.summary}${flagText}`;
+  }).join('\n');
+}
+
+// その週の最後の重大イベント時点のバージョン（＝週末時点のAI Capitalバージョン）
+function latestVersionThisWeek(events) {
+  if (!events || events.length === 0) return null;
+  return events[events.length - 1].version || null;
 }
 
 // ── 集計ヘルパー ──────────────────────────────────────────────
@@ -179,7 +226,12 @@ const WEEKLY_SUMMARY_SYSTEM = `あなたはAI Capital運用チーム全体を俯
 ・AI Capitalの行動概要
 ・今週の結論
 の3要素を、箇条書きではなく1つの流れる文章として織り込むこと。
-与えられたデータのみを根拠にし、新しい数値を創作しないこと。数値を羅列するだけの文にしないこと。`;
+与えられたデータのみを根拠にし、新しい数値を創作しないこと。数値を羅列するだけの文にしないこと。
+【重要】contextに「今週の重大アップデート」という項目がある場合、それは今週AI Capitalに
+加えられた仕様変更・ルール変更等の重大な出来事である。その場合は必ず1文でその内容に触れ、
+「更新後バージョン」が含まれていれば「AI Capitalはv2.4へ更新されました」のように
+バージョン番号も明記すること。この項目が無い場合は、通常通り上記3要素のみで構成すること
+（無理に言及を作らないこと）。`;
 
 async function buildSummary(data) {
   const ctx = weekContextText(data);
@@ -195,7 +247,7 @@ async function buildSummary(data) {
 // ── ②今週のトピック（機械生成） ───────────────────────────────
 
 function buildTopics(data) {
-  const { orders, decisions, marketSummary, market } = data;
+  const { orders, decisions, marketSummary, market, majorEvents } = data;
   if (!marketSummary) return `## ② 今週のトピック\n\nデータなし`;
 
   const assetCounts = {};
@@ -219,11 +271,18 @@ function buildTopics(data) {
     }
   }
 
+  // システム更新: development_logs 由来の重大イベントを機械的にそのまま列挙する（毎週固定の形式）
+  const systemUpdate = (majorEvents && majorEvents.length > 0)
+    ? majorEvents.map(e => `${e.type}：${e.title}`).join(' / ')
+    : 'なし（通常運用週）';
+  const versionNote = latestVersionThisWeek(majorEvents);
+
   const items = [
-    topAsset ? `${topAsset[0]}へ${topAsset[1]}回投資` : '今週の投資実行なし',
+    `投資回数：${orders.length}回${topAsset ? `（最多は${topAsset[0]}へ${topAsset[1]}回）` : ''}`,
     `WAIT判断 ${waitCount}回`,
     `Fear & Greed平均 ${fgAvg ?? '—'}`,
     `今週最大の出来事：${bigEvent}`,
+    `システム更新：${systemUpdate}${versionNote ? `（${versionNote} へ更新）` : ''}`,
   ];
 
   return [`## ② 今週のトピック`, '', ...items.map(i => `・${i}`)].join('\n');
@@ -352,7 +411,7 @@ const WEEKLY_HIGHLIGHT_SYSTEM = `今週1週間のAI Capitalの判断データを
 ・最も良かった判断
 ・最も難しかった判断（部署間で意見が割れた場面など）
 ・WAITが有効だった場面
-・逆張りが機能した場面
+・複数指標の総合評価が功を奏した場面
 単に結果を述べるのではなく、「どの部署がどう主張し、何が対立し、最終的にどう決着したか」という
 議論の流れ（ストーリー）が伝わるように書くこと。日付を明記し、各判断3〜4行程度。
 与えられたデータのみ使うこと。新しい数値を創作しないこと。`;
@@ -416,11 +475,17 @@ const WEEKLY_LEARNING_SYSTEM = `あなたはAI Capital運用チーム全体を�
 「今週の議論からAI Capitalが得た新しい判断基準や改善点」を3〜4点、箇条書きでまとめてください。
 単なる市場解説ではなく、今週のやり取りを通じてAIの判断ロジックがどう変化・洗練されたかという視点で書くこと
 （視点の例：単一指標だけで判断しない／複数指標の組み合わせを重視するようになった／保有比率や集中度を判断材料に加えた、など。ただし例の丸写しは禁止）。
-与えられたデータから読み取れる具体的な傾向のみ書くこと。各項目1行、簡潔に。`;
+与えられたデータから読み取れる具体的な傾向のみ書くこと。各項目1行、簡潔に。
+【重要】contextに「今週の重大アップデート」という項目がある場合、それは今週AI Capitalの
+判断ロジック・ルール・体制に加えられた変更である。箇条書きの1項目として、その変更が
+AI Capitalの判断にどう影響するかを必ず含めること。この項目が無い場合は、通常通り
+判断精度の向上・部署間の議論・運用改善といった観点でまとめること。`;
 
 function weekContextText(data) {
-  const { marketSummary, decisions, orders, votesByDept, recsByDept } = data;
+  const { marketSummary, decisions, orders, votesByDept, recsByDept, majorEvents } = data;
   const parts = [];
+  const eventsText = majorEventsContextText(majorEvents);
+  if (eventsText) parts.push(`今週の重大アップデート:\n${eventsText}`);
   if (marketSummary) {
     parts.push(`Fear&Greed: ${marketSummary.fear_greed?.min}-${marketSummary.fear_greed?.max}(avg ${marketSummary.fear_greed?.avg}) / VIX: ${marketSummary.vix?.min}-${marketSummary.vix?.max}(avg ${marketSummary.vix?.avg})`);
   }
@@ -484,7 +549,10 @@ const WEEKLY_SECRETARY_SYSTEM = `あなたは相沢レイ、AI Capitalの秘書�
 ただし「SOXを買うべき」のような具体的な投資方針・銘柄への言及は禁止。
 「部署間の連携をより深めたい」「リスク許容度の判断基準を精緻化したい」のような、
 AI Capitalという組織としての運営・議論姿勢に関する方針・展望に留めること。
-地の文で、同じ表現・言い回しの繰り返しは避けること。5〜7行程度。与えられたデータのみを根拠にすること。`;
+地の文で、同じ表現・言い回しの繰り返しは避けること。5〜7行程度。与えられたデータのみを根拠にすること。
+【重要】contextに「今週の重大アップデート」がある場合、前半の振り返りの中でその変更に触れ、
+バージョン表記（例: v2.4）が含まれていれば「AI Capitalはv2.4へ更新されました」のように
+明記すること。この項目が無い場合は、通常通り会議・議論の振り返りのみで構成すること。`;
 
 async function buildSecretaryReport(data) {
   const ctx = weekContextText(data);
@@ -641,6 +709,114 @@ async function buildPreview(data) {
   return [`## ⑭ 次号予告`, '', '【次号予告】', '', content].join('\n');
 }
 
+// ── ⑮今週の記事品質（機械生成・quality_scoresを参照・Phase4） ───
+
+const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
+
+function fmtDayLabel(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  return `${dateStr.slice(5).replace('-', '/')}(${WEEKDAY_JA[d.getUTCDay()]})`;
+}
+
+// 週の基準日から n週間前の同一曜日の日付を返す（weekBefore(d, 0) === d）
+function weekBefore(dateStr, weeks) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 7 * weeks);
+  return d.toISOString().slice(0, 10);
+}
+
+// quality_scores の列名 → Weekly本文向けラベル（development_logsの品質改善検知とは独立）
+const QUALITY_CATEGORY_LABELS = {
+  layout_score:     'レイアウト',
+  japanese_score:   '日本語品質',
+  logic_score:      '投資ロジック',
+  department_score: '部署人格',
+  validator_score:  'Validator',
+  editor_score:     '編集長評価',
+};
+
+function avgOf(rows, key) {
+  const vals = rows.map(r => parseFloat(r[key])).filter(v => !isNaN(v));
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+async function buildQualityReport(data) {
+  const { start, end } = data.period;
+  const thisWeekRows = await sheets.getRowsByDateRange('quality_scores', start, end).catch(() => []);
+
+  if (thisWeekRows.length === 0) {
+    return `## ⑮ 今週の記事品質\n\nデータなし`;
+  }
+
+  const sorted = [...thisWeekRows].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const dailyLines = sorted.map(r => `${fmtDayLabel(r.date)}　${Math.round(parseFloat(r.total_score) || 0)}点`);
+  const weekAvg = avgOf(sorted, 'total_score');
+
+  const lines = [
+    `## ⑮ 今週の記事品質`,
+    '',
+    ...dailyLines,
+    '',
+    `平均　${weekAvg != null ? Math.round(weekAvg * 10) / 10 : 'N/A'}点`,
+  ];
+
+  // ── 前週比でもっとも改善されたカテゴリ（実装④） ───────────────
+  const prevWeekRows = await sheets.getRowsByDateRange(
+    'quality_scores', weekBefore(start, 1), weekBefore(end, 1)
+  ).catch(() => []);
+
+  if (prevWeekRows.length > 0) {
+    const improvements = Object.entries(QUALITY_CATEGORY_LABELS)
+      .map(([key, label]) => {
+        const curAvg  = avgOf(sorted, key);
+        const prevAvg = avgOf(prevWeekRows, key);
+        if (curAvg == null || prevAvg == null) return null;
+        const delta = Math.round((curAvg - prevAvg) * 10) / 10;
+        return delta > 0 ? { label, delta } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.delta - a.delta)
+      .slice(0, 3);
+
+    if (improvements.length > 0) {
+      lines.push('', '今週もっとも改善された項目', '');
+      improvements.forEach(i => lines.push(`${i.label}　+${i.delta}点`));
+    }
+  }
+
+  // ── 4週間の品質推移（実装⑤） ───────────────────────────────
+  const trendWeeks = [];
+  for (let i = 3; i >= 0; i--) {
+    const wStart = weekBefore(start, i);
+    const wEnd   = weekBefore(end, i);
+    const rows   = await sheets.getRowsByDateRange('quality_scores', wStart, wEnd).catch(() => []);
+    const scores = rows.map(r => parseFloat(r.total_score)).filter(v => !isNaN(v));
+    if (scores.length === 0) continue;
+    trendWeeks.push({
+      week_id: weekId(wStart),
+      avg: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10,
+      min: Math.min(...scores),
+      max: Math.max(...scores),
+    });
+  }
+
+  if (trendWeeks.length > 0) {
+    lines.push('', '品質推移（過去4週間）', '');
+    trendWeeks.forEach(w => lines.push(`${w.week_id}　平均${w.avg}点（最低${w.min}／最高${w.max}）`));
+
+    if (trendWeeks.length >= 2) {
+      const first = trendWeeks[0].avg;
+      const lastW = trendWeeks[trendWeeks.length - 1].avg;
+      if (first > 0) {
+        const rate = Math.round((lastW - first) / first * 1000) / 10;
+        lines.push('', `改善率　${rate >= 0 ? '+' : ''}${rate}%`);
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
 // ── note.com向けクリーンアップ ─────────────────────────────────
 
 /**
@@ -659,10 +835,38 @@ function cleanupForNote(markdown) {
   return note.trim();
 }
 
+// ── 固定テンプレート定義（①〜⑭・単一の正本） ───────────────────
+//
+// Weekly記事の章構成・順序はこの配列だけが正本（single source of truth）。
+// 章を追加/削除/並べ替えたい場合はここを編集する（buildWeeklyDraft側は不変）。
+// 各 build は (data) → string | Promise<string> を返す関数で、
+// data（その週のデータ）だけが週ごとに変化し、build自体（＝テンプレート・
+// プロンプト）は固定のまま再利用される、という「固定テンプレート＋可変データ」
+// 構造をこの配列がそのまま体現している。
+const WEEKLY_SECTIONS = [
+  { no: '①',  title: '今週の総括',             build: buildSummary },
+  { no: '②',  title: '今週のトピック',           build: buildTopics },
+  { no: '③',  title: '今週のマーケット振り返り',   build: buildMarketRecap },
+  { no: '④',  title: 'AI Capitalの行動履歴',     build: buildActionHistory },
+  { no: '⑤',  title: '部署別レビュー',           build: buildDeptReviews },
+  { no: '⑥',  title: '今週の判断ハイライト',       build: buildHighlights },
+  { no: '⑦',  title: 'ポートフォリオ変化',        build: buildPortfolioChange },
+  { no: '⑧',  title: 'AIが学んだこと',           build: buildLearning },
+  { no: '⑨',  title: '来週の注目条件',           build: buildWatchPoints },
+  { no: '⑩',  title: '秘書室長週報',             build: buildSecretaryReport },
+  { no: '⑪',  title: 'MVP',                    build: buildMvp },
+  { no: '⑫',  title: '今週の一言',               build: buildQuote },
+  { no: '⑬',  title: '来週のAI Capital会議テーマ', build: buildNextTheme },
+  { no: '⑭',  title: '次号予告',                 build: buildPreview },
+  { no: '⑮',  title: '今週の記事品質',           build: buildQualityReport },
+];
+
 // ── メイン ──────────────────────────────────────────────────
 
 /**
  * 週刊記事ドラフトを組み立てる（LLM呼び出しあり・note保存なし）
+ * WEEKLY_SECTIONS の順で①〜⑭を毎週固定生成する。
+ * （LLM負荷を局所に集中させないよう、機械生成/LLM生成を問わず順次実行する）
  * @returns {Promise<{ note: string, meta: object, chartData: Array }>}
  */
 async function buildWeeklyDraft(startDate, endDate) {
@@ -676,40 +880,10 @@ async function buildWeeklyDraft(startDate, endDate) {
     '',
   ].join('\n');
 
-  // 機械生成セクション（並列不要・高速）
-  const topics          = buildTopics(data);
-  const marketRecap     = buildMarketRecap(data);
-  const actionHistory   = buildActionHistory(data);
-  const portfolioChange = buildPortfolioChange(data);
-  const watchPoints     = buildWatchPoints(data);
-
-  // LLM生成セクション（順次実行。並列だとローカルLLMに負荷が集中するため）
-  const summary          = await buildSummary(data);
-  const deptReviews      = await buildDeptReviews(data);
-  const highlights       = await buildHighlights(data);
-  const learning         = await buildLearning(data);
-  const secretaryReport  = await buildSecretaryReport(data);
-  const mvp               = await buildMvp(data);
-  const quote             = await buildQuote(data);
-  const nextTheme          = await buildNextTheme(data);
-  const preview            = await buildPreview(data);
-
-  const sections = [
-    summary,
-    topics,
-    marketRecap,
-    actionHistory,
-    deptReviews,
-    highlights,
-    portfolioChange,
-    learning,
-    watchPoints,
-    secretaryReport,
-    mvp,
-    quote,
-    nextTheme,
-    preview,
-  ];
+  const sections = [];
+  for (const section of WEEKLY_SECTIONS) {
+    sections.push(await section.build(data));
+  }
 
   const footer = [
     '',
@@ -764,4 +938,5 @@ module.exports = {
   buildWeeklyDraft,
   publishWeekly,
   cleanupForNote,
+  WEEKLY_SECTIONS,
 };

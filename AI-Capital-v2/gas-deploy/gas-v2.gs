@@ -122,14 +122,30 @@ var SHEET_DEFS = [
   },
   {
     name: 'development_logs',
-    headers: ['log_id', 'date', 'phase', 'title', 'summary', 'changes', 'status', 'system_version', 'created_at'],
+    headers: ['log_id', 'date', 'type', 'title', 'summary', 'affected_files', 'reason',
+              'impact', 'breaking_change', 'version', 'status', 'system_version', 'created_at'],
     color: '#EDE7F6',
   },
   {
     name: 'quality_status',
     headers: ['date', 'article_id', 'validator', 'portfolio', 'orders', 'final_decision',
-              'capital_events', 'charts', 'layout', 'overall', 'manual_fix', 'consecutive_pass', 'note'],
+              'capital_events', 'charts', 'layout', 'overall', 'manual_fix', 'record_type',
+              'consecutive_pass', 'note'],
     color: '#E8F5E9',
+  },
+  {
+    name: 'quality_scores',
+    headers: ['date', 'article_id', 'layout_score', 'japanese_score', 'logic_score',
+              'department_score', 'validator_score', 'editor_score', 'total_score',
+              'warning_count', 'regeneration_count', 'mechanical_fix_count',
+              'editor_comment', 'publish_decision', 'created_at'],
+    color: '#FFF3E0',
+  },
+  {
+    name: 'health_log',
+    headers: ['timestamp', 'service', 'status', 'check_type', 'restart_count',
+              'recovery_result', 'error_detail', 'action'],
+    color: '#FFEBEE',
   },
 ];
 

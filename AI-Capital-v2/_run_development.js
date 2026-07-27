@@ -11,7 +11,7 @@
 require('dotenv').config();
 
 const {
-  PHASE1_COMPLETION,
+  BOOTSTRAP_LOG,
   buildDevelopmentLog,
   saveDevelopmentLog,
 } = require('./agents/development');
@@ -21,13 +21,12 @@ async function main() {
 
   console.log('開発ログ確認\n');
 
-  const { log, meta } = await buildDevelopmentLog(PHASE1_COMPLETION, '2026-06-28');
+  const { log, meta } = await buildDevelopmentLog(BOOTSTRAP_LOG, '2026-06-28');
 
   console.log('--- メタデータ ---');
   console.log(JSON.stringify(meta, null, 2));
   console.log('\n--- ログ内容 ---');
-  console.log(`summary: ${log.summary}`);
-  console.log(`changes: ${log.changes}`);
+  console.log(JSON.stringify(log, null, 2));
 
   if (dryRun) {
     console.log('\n✅ dry-run 完了（保存なし）');
@@ -35,7 +34,7 @@ async function main() {
   }
 
   console.log('\n保存中...');
-  await saveDevelopmentLog(PHASE1_COMPLETION, '2026-06-28');
+  await saveDevelopmentLog(BOOTSTRAP_LOG, '2026-06-28');
   console.log('✅ development_logs シートへ保存完了');
 }
 

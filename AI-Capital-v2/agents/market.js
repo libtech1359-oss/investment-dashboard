@@ -26,18 +26,21 @@ const SYSTEM = `
   各列の数値: fear_greed(0-100) vix(数値) sp500/nasdaq100/sox/gold(前日比%) usdjpy(円)
 - candidate_assets: nav_pricesから算出した確定基準価格ベースの候補銘柄データ
   列: nav(最新基準価格) ath_nav(最高値) ath_gap_pct(ATH乖離%) daily_change_pct(前日比%)
-      chg_5d(5日変化%) chg_20d(20日変化%) rebound_rate(20日安値からの反発%) score(逆張りスコア)
+      chg_5d(5日変化%) chg_20d(20日変化%) rebound_rate(20日安値からの反発%) score(総合評価スコア)
   nav_ok=FALSE の銘柄は nav_prices にデータが未蓄積（スコア=0は中立値）
 
 【分析基準（厳守）】
 VIX: <15=SAFE <20=SAFE/CAUTION <30=CAUTION >30=DANGER
 Fear & Greed: 0-25=極端な恐怖 26-45=恐怖 46-54=中立 55-75=強欲 76-100=極端な強欲
 
-逆張りシグナル条件（1つ以上該当でACCUMULATEを検討）:
-- Fear & Greed <= 40（恐怖局面）
-- NASDAQ 前日比 <= -2%
-- 買付候補ATH乖離率 <= -15%
-- chg_5d <= -5%（5日間で5%以上下落）
+総合市場評価（いずれか1つの指標だけでACCUMULATE/BUYを決めないこと）:
+以下を総合して判断すること。複数指標が同じ方向を示す場合のみ、その方向のシグナルを検討する。
+- Fear & Greed（市場心理の一つの表れ。低い＝即買いではない）
+- VIX（不確実性の水準）
+- 買付候補のATH乖離率・前日比・5日/20日変化率（価格モメンタム）
+- 候補銘柄のスコア・順位（候補一覧のRule Engine総合評価）
+- ポートフォリオ状況（保有比率・目標配分との乖離。コンテキストに[既存保有]表記があれば参照）
+Fear & Greedが低い、あるいはATH乖離が大きいというだけでACCUMULATEを結論付けることは禁止。
 
 【JSON出力スキーマ（必ず守ること）】
 自由文・Markdown禁止。以下のJSONのみ出力。
@@ -106,7 +109,7 @@ async function buildContext(date) {
 
   if (candidates.length > 0) {
     lines.push('');
-    lines.push('【買付候補銘柄（逆張りスコア順）】');
+    lines.push('【買付候補銘柄（総合評価スコア順）】');
     candidates.sort((a, b) => parseInt(a.rank || 99) - parseInt(b.rank || 99));
     candidates.forEach(c => lines.push(formatCandidate(c)));
   } else {
