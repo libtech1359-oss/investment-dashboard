@@ -1,5 +1,11 @@
 {
-  "version": "2.0.0",
-  "updated_at": null,
-  "history": []
+  "version": "2.1.0",
+  "updated_at": "2026-07-27 21:34:39",
+  "history": [
+    {
+      "version": "2.1.0",
+      "date": "2026-07-27 21:34:39",
+      "reason": "AI Capital v2: 週次テンプレート化・記事品質Phase1-5・Rule12誤検知修正をまとめてコミット"
+    }
+  ]
 }
