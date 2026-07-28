@@ -28,8 +28,11 @@
  *   + allocationAdjust（② config/targetAllocation.js の目標配分との乖離。不足なら加点・超過なら減点）
  *   + cooldownAdjust（③ 直近の連続購入を減点。ただしRule Engineが強い日は無効化される）
  *   + orderAssist（規則エンジンの推奨第1候補への極小の後押し）
+ *   + balanceAdjust（④ 直近 final_decisions での採用履歴が偏っている銘柄を軽く減点。
+ *     config/candidatePenalty.js で設定。禁止ではなく僅差の場合のみ他候補に機会を残す補正）
  *   をそれぞれ ±config/decisionWeights.js の範囲で加算する。
- *   重みは config/decisionWeights.js で管理する（コードに固定値を埋め込まない）。
+ *   重みは config/decisionWeights.js（採用履歴補正は config/candidatePenalty.js）で管理する
+ *   （コードに固定値を埋め込まない）。
  *   voteScoreは0〜1の全域を持つのに対し各補正の振れ幅は小さいため、部署支持率の大差は
  *   覆せず、僅差・ほぼ同点のケースのみ客観指標・ポートフォリオ状況が結論を左右する。
  *   「一番スコアが高い銘柄を買う」のではなく「長期ポートフォリオ全体として最適な判断をする」
@@ -43,6 +46,7 @@
 const sheets            = require('./sheets');
 const W                 = require('../config/decisionWeights');
 const TARGET_ALLOCATION = require('../config/targetAllocation');
+const CP                = require('../config/candidatePenalty');
 
 const SIGNAL_WEIGHT = {
   BUY: 2.0, ACCUMULATE: 1.0, WAIT: 0.0, DEFEND: -1.0, SELL: -2.0,
@@ -143,8 +147,13 @@ async function run(date) {
     try {
       const cooldownStart = addDays(date, -W.RECENT_PURCHASE_COOLDOWN_DAYS);
       const cooldownEnd   = addDays(date, -1);
+      // ④ 採用履歴補正: LOOKBACK_DECISIONS「営業日」分のfinal_decisionsを拾うため、
+      // 土日・祝日で判断が飛ぶ分も見込んでカレンダー日数は3倍の幅を取る
+      // （実際に集計へ使うのは直近LOOKBACK_DECISIONS件のみ。下のrecentTargets参照）。
+      const balanceStart = addDays(date, -(CP.LOOKBACK_DECISIONS * 3));
+      const balanceEnd    = addDays(date, -1);
 
-      const [candidates, recs, pf, mkt, recentOrders] = await Promise.all([
+      const [candidates, recs, pf, mkt, recentOrders, recentDecisions] = await Promise.all([
         sheets.getRowsByDate('candidate_assets', date),
         sheets.getRowsByDate('agent_recommendations', date)
           .then(r => r.length > 0 ? r : sheets.getRowsByDate('department_recommendations', date))
@@ -152,7 +161,16 @@ async function run(date) {
         sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
         sheets.getLatestRowAsOf('market_data', date).catch(() => null),
         sheets.getRowsByDateRange('orders', cooldownStart, cooldownEnd).catch(() => []),
+        sheets.getRowsByDateRange('final_decisions', balanceStart, balanceEnd).catch(() => []),
       ]);
+
+      // ④ 採用履歴補正: 直近CP.LOOKBACK_DECISIONS件（BUY/ACCUMULATEでtarget_assetが
+      // 決定した回のみ）を新しい順に並べる。WAIT/DEFEND/SELLや銘柄未決定の日は対象外。
+      const recentTargets = recentDecisions
+        .filter(d => d.target_asset && d.target_asset !== '')
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .slice(0, CP.LOOKBACK_DECISIONS)
+        .map(d => d.target_asset);
 
       // 全部署の投票内訳（見送りも含めてデバッグログ用に記録。reasonには含めない）
       const deptChoices = recs.map(r => {
@@ -240,18 +258,35 @@ async function run(date) {
 
           const orderAssist = rank === 1 ? W.RANK_ORDER_ASSIST : 0;
 
+          // ④ 採用履歴補正: 直近CP.LOOKBACK_DECISIONS件のfinal_decisionsで同一銘柄が
+          //    繰り返し採用されているほど軽く減点する（採用回数に比例、線形）。
+          //    MIN_OCCURRENCES未満（＝1回程度）は自然な選択として補正しない。
+          //    禁止ではなく、他候補との差が僅差の場合のみ結果を左右する弱い補正にする。
+          const balanceOccurrences = recentTargets.filter(a => a === c.asset_name).length;
+          const balanceAdjust = balanceOccurrences >= CP.MIN_OCCURRENCES
+            ? -(balanceOccurrences / CP.LOOKBACK_DECISIONS) * CP.MAX_PENALTY
+            : 0;
+
           const combined = voteScore * W.DEPT_BASE_WEIGHT + ruleAdjust
-            + holdingRatioAdjust + allocationAdjust + cooldownAdjust + orderAssist;
+            + holdingRatioAdjust + allocationAdjust + cooldownAdjust + orderAssist + balanceAdjust;
 
           return {
             asset_name: c.asset_name,
             combined, rankScore, voteScore, ruleAdjust,
             holdingRatioAdjust, holdingRatioPct, allocationAdjust, targetAllocPct, currentAllocPct,
-            cooldownAdjust, orderAssist,
+            cooldownAdjust, orderAssist, balanceAdjust, balanceOccurrences,
             deptCount:      matchedRecs.length,
             matchedAmounts: matchedRecs.map(r => parseInt(r.amount || 0)),
           };
         });
+
+        // ④ 採用履歴補正のログ（透明性確保: 補正が適用された銘柄のみ出力）
+        scored
+          .filter(s => s.balanceAdjust !== 0)
+          .forEach(s => {
+            console.log(`[signalAggregator] Candidate Balance: ${s.asset_name} ${s.balanceAdjust.toFixed(3)} `
+              + `（理由: 直近${CP.LOOKBACK_DECISIONS}営業日中${s.balanceOccurrences}回採用）`);
+          });
 
         scored.sort((a, b) => b.combined - a.combined);
         const winner   = scored[0];
@@ -260,7 +295,7 @@ async function run(date) {
 
         // ログ出力（上位3件）
         const top3 = scored.slice(0, 3)
-          .map(s => `${s.asset_name}(combined=${s.combined.toFixed(3)} vote=${s.voteScore.toFixed(3)} rule=${s.ruleAdjust>=0?'+':''}${s.ruleAdjust.toFixed(3)} hold=${s.holdingRatioAdjust.toFixed(3)} alloc=${s.allocationAdjust>=0?'+':''}${s.allocationAdjust.toFixed(3)}(目標${s.targetAllocPct}%/現在${s.currentAllocPct.toFixed(1)}%) cooldown=${s.cooldownAdjust.toFixed(3)} order=+${s.orderAssist.toFixed(3)} n=${s.deptCount})`)
+          .map(s => `${s.asset_name}(combined=${s.combined.toFixed(3)} vote=${s.voteScore.toFixed(3)} rule=${s.ruleAdjust>=0?'+':''}${s.ruleAdjust.toFixed(3)} hold=${s.holdingRatioAdjust.toFixed(3)} alloc=${s.allocationAdjust>=0?'+':''}${s.allocationAdjust.toFixed(3)}(目標${s.targetAllocPct}%/現在${s.currentAllocPct.toFixed(1)}%) cooldown=${s.cooldownAdjust.toFixed(3)} order=+${s.orderAssist.toFixed(3)} balance=${s.balanceAdjust.toFixed(3)}(${s.balanceOccurrences}/${CP.LOOKBACK_DECISIONS}) n=${s.deptCount})`)
           .join(' / ');
         console.log(`[signalAggregator] 銘柄スコア上位3: ${top3} (VIX減衰=${vixDamp})`);
 
