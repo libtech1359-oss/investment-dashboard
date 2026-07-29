@@ -112,6 +112,8 @@ async function run({ skipPublish = false, onProgress = null } = {}) {
       if (article?.validationFailed) {
         const warningsText = (article.validationWarnings || []).join('\n\n');
         notify(`❌ 【審査部】記事公開ブロック: 整合性チェック失敗（${article.validationWarnings.length}件）\n${warningsText}`);
+      } else if (article?.chartsIncomplete) {
+        notify(`❌ 【グラフ埋め込み】要確認: グラフ生成${article.graphsGenerated}/2 埋め込み${article.graphsEmbedded}/2（note記事 ${article.note.length}字・下書きは保存済み）`);
       } else {
         notify(`Step 5 完了: note記事 ${article.note.length}字`);
       }

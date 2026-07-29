@@ -82,6 +82,8 @@ const STATUS = {
 const QUALITY_EVENT_TYPES = {
   QUALITY_IMPROVEMENT: 'QUALITY_IMPROVEMENT', // 前回記録比でtotal_scoreが向上
   EDITOR_REJECTION:     'EDITOR_REJECTION',    // AI編集長が「公開を推奨しません」と判定
+  CHART_GENERATION_INCOMPLETE: 'CHART_GENERATION_INCOMPLETE', // グラフ生成が2枚未満（公開停止）
+  CHART_EMBED_INCOMPLETE:      'CHART_EMBED_INCOMPLETE',      // グラフ生成は2枚だが記事への埋め込みが2枚未満
 };
 
 // ── 初回ログデータ（このシステム自体の記録は手動記録として残す） ────

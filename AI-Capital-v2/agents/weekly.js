@@ -916,19 +916,39 @@ async function publishWeekly(startDate, endDate) {
     console.warn(`[weekly] 推移チャート生成失敗: ${e.message}`);
   }
 
-  const cleaned  = cleanupForNote(note);
+  // 週刊は▼HISTORY▼（推移チャート）1枚のみが仕様（円グラフに相当する▼CHART▼は使わない）
+  const graphsGenerated = trendChartPath ? 1 : 0;
+  console.log(`[weekly] Graphs Generated : ${graphsGenerated} / 1`);
+
+  let cleaned  = cleanupForNote(note);
   const thumbPath = fs.existsSync(WEEKLY_THUMB_PATH) ? WEEKLY_THUMB_PATH : null;
   if (!thumbPath) console.warn(`[weekly] 週刊サムネイルが見つかりません: ${WEEKLY_THUMB_PATH}`);
 
+  // 見出し検出に依存しない保険挿入（日刊publisher.jsと同じ最終防衛ライン）
+  if (!cleaned.includes('▼HISTORY▼')) {
+    console.warn('[weekly] ▼HISTORY▼ が本文に存在しないため末尾に保険挿入します');
+    cleaned += '\n\n▼HISTORY▼\n';
+  }
+
   let noteUrl = null;
+  let graphsEmbedded = 0;
   try {
     const result = await noteDraft.saveDraft({ body: cleaned, historyChartPath: trendChartPath, thumbPath });
     noteUrl = result.url;
+    graphsEmbedded = result.historyEmbedded ? 1 : 0;
+    console.log(`[weekly] Graphs Embedded : ${graphsEmbedded} / 1`);
+    if (graphsEmbedded < 1) {
+      console.error(`[weekly] 推移チャートが記事へ埋め込まれませんでした（要確認）: ${noteUrl}`);
+    }
   } catch (e) {
     console.error(`[weekly] note.com 下書き保存失敗: ${e.message}`);
   }
 
-  return { note: cleaned, meta, noteUrl };
+  return {
+    note: cleaned, meta, noteUrl,
+    chartsIncomplete: graphsEmbedded < 1,
+    graphsGenerated, graphsEmbedded,
+  };
 }
 
 module.exports = {

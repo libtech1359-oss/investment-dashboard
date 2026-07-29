@@ -1191,6 +1191,10 @@ async function publish(date) {
     console.log(`[publisher] サムネイル: ${thumbPath ? 'OK' : '失敗'}`);
   } catch (e) { console.warn(`[publisher] サムネイル生成失敗: ${e.message}`); }
 
+  // ── チェック①: グラフ生成数（円グラフ＋面グラフの2枚。サムネイルは対象外） ──
+  const graphsGenerated = [chartPath, historyChartPath].filter(Boolean).length;
+  console.log(`[publisher] Graphs Generated : ${graphsGenerated} / 2`);
+
   // ── 公開停止時でも「修正版Draft」だけは必ず保存する（ゼロ件終了の禁止） ──
   // note.com下書きとして保存するのみで、実際の公開（下書き→公開ボタン）は行わない。
   async function saveFallbackDraft(reason) {
@@ -1277,7 +1281,7 @@ async function publish(date) {
   // validation は品質改善ループ（機械修正→LLM再生成）の最終結果をそのまま使う。
   {
     const SEP      = '━'.repeat(24);
-    const chartsOk = !!(historyChartPath && thumbPath);
+    const chartsOk = !!(chartPath && historyChartPath);
 
     // 品質記録（PASS/FAIL 問わず実行。editorReviewはAPPROVED時のみ非null）
     const qualityResult = await recordQuality({
@@ -1323,12 +1327,64 @@ async function publish(date) {
     console.log(buildProgressLog(qualityResult.overall, qualityResult.record_type, qualityResult.consecutive_pass, qualityResult.score));
   }
 
+  // ── チェック④: グラフ生成が2枚未満なら公開停止（修正版Draftのみ保存） ──
+  // グラフはAI Capital記事の重要コンテンツのため、0〜1枚しか生成できていない場合は
+  // 通常の下書き保存（実質的な「公開」扱い）へ進まず、Validator失敗時と同じ経路で止める。
+  if (graphsGenerated < 2) {
+    console.error(`[publisher] グラフ生成が${graphsGenerated}/2枚のため公開を停止します（円グラフ:${chartPath ? 'OK' : '失敗'} 面グラフ:${historyChartPath ? 'OK' : '失敗'}）`);
+    await development.saveDevelopmentLog({
+      type:            development.QUALITY_EVENT_TYPES.CHART_GENERATION_INCOMPLETE,
+      title:           `グラフ生成不足により公開停止（${articleNum}）`,
+      summary:         `円グラフ:${chartPath ? 'OK' : '失敗'} / 面グラフ:${historyChartPath ? 'OK' : '失敗'}`,
+      affected_files:  'data/charts',
+      reason:          'グラフ生成が2枚未満のため公開停止',
+      impact:          'medium',
+      breaking_change: false,
+      status:          development.STATUS.AUTO_QUALITY,
+    }, date).catch(err => console.warn(`[publisher] CHART_GENERATION_INCOMPLETEログ記録失敗: ${err.message}`));
+    const fallbackDraftUrl = await saveFallbackDraft('グラフ生成不足');
+    return {
+      note, x: '', date, noteUrl: null,
+      validationFailed: true, chartsIncomplete: true,
+      graphsGenerated, graphsEmbedded: 0,
+      fallbackDraftUrl,
+    };
+  }
+
+  // ── チェック②: 本文内にマーカーが両方存在するか（見出し検出に依存しない最終防衛ライン） ──
+  // applyPostProcessing()内の見出し検出（💰/👑）が何らかの理由で失敗しても、ここで必ず
+  // マーカーを本文へ追記することで、noteDraft.jsの画像挿入が「no-marker」で失敗しないようにする。
+  for (const marker of ['▼HISTORY▼', '▼CHART▼']) {
+    if (!note.includes(marker)) {
+      console.warn(`[publisher] ${marker} が本文に存在しないため末尾に保険挿入します`);
+      const disclaimerIdx = note.indexOf('\n*AI Capital');
+      const pos = disclaimerIdx >= 0 ? disclaimerIdx : note.length;
+      note = note.slice(0, pos) + `\n\n${marker}\n` + note.slice(pos);
+    }
+  }
+
   // note.com へ下書き保存（先に保存してURLを取得）
   let noteUrl = null;
+  let graphsEmbedded = 0;
   try {
     const result = await saveDraft({ body: note, chartPath, historyChartPath, thumbPath });
     noteUrl = result.url;
+    graphsEmbedded = [result.historyEmbedded, result.chartEmbedded].filter(Boolean).length;
+    console.log(`[publisher] Graphs Embedded : ${graphsEmbedded} / 2`);
     console.log(`[publisher] note.com 下書き保存完了: ${noteUrl}`);
+    if (graphsEmbedded < 2) {
+      console.error(`[publisher] グラフ埋め込みが${graphsEmbedded}/2枚のため要確認です（history:${result.historyEmbedded} chart:${result.chartEmbedded}）`);
+      await development.saveDevelopmentLog({
+        type:            development.QUALITY_EVENT_TYPES.CHART_EMBED_INCOMPLETE,
+        title:           `グラフ埋め込み不足（${articleNum}）`,
+        summary:         `history埋め込み:${result.historyEmbedded} / chart埋め込み:${result.chartEmbedded} / note: ${noteUrl}`,
+        affected_files:  'lib/noteDraft.js',
+        reason:          'note.com下書きへの画像埋め込みが2枚未満',
+        impact:          'medium',
+        breaking_change: false,
+        status:          development.STATUS.AUTO_QUALITY,
+      }, date).catch(err => console.warn(`[publisher] CHART_EMBED_INCOMPLETEログ記録失敗: ${err.message}`));
+    }
   } catch (err) {
     console.error(`[publisher] note.com 下書き保存失敗: ${err.message}`);
   }
@@ -1346,7 +1402,11 @@ async function publish(date) {
   x = x.replace(/^パターン[A-Cａ-ｃ][\s\S]*?\n\n?/, '');
   console.log(`[publisher] X投稿文生成完了 (${x.length}字)`);
 
-  return { note, x, date, noteUrl };
+  return {
+    note, x, date, noteUrl,
+    chartsIncomplete: graphsEmbedded < 2,
+    graphsGenerated, graphsEmbedded,
+  };
 }
 
 module.exports = { publish };

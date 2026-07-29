@@ -283,7 +283,9 @@ async function insertViaHtml(page, text) {
 /**
  * note.com に下書き保存する
  * @param {{ title?: string, body: string, thumbPath?: string, historyChartPath?: string, chartPath?: string }} opts
- * @returns {{ success: boolean, url: string }}
+ * @returns {{ success: boolean, url: string, historyEmbedded: boolean, chartEmbedded: boolean }}
+ *   historyEmbedded/chartEmbedded は対応するimagePathが渡され、実際にnote.comのProseMirror内へ
+ *   画像挿入できた場合のみtrue（Graphs Embedded集計に使用）。
  */
 async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath }) {
   const { chromium } = require('playwright');
@@ -360,7 +362,8 @@ async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath }
     log(`[debug] editor child count after insert: ${pCount}`);
 
     // 画像挿入: ▼HISTORY▼ → 面グラフ（上段）、▼CHART▼ → 円グラフ（ファンドセクション）
-    await insertImage(page, '▼HISTORY▼', historyChartPath || null);
+    // 戻り値（true/false）は呼び出し元がGraphs Embeddedの集計に使うため必ず捕捉する。
+    const historyEmbedded = await insertImage(page, '▼HISTORY▼', historyChartPath || null);
     // 1枚目挿入後: エディタ状態を安定させてから2枚目を試みる
     await page.waitForTimeout(4000);
     try {
@@ -370,7 +373,7 @@ async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath }
       await page.click('.ProseMirror');
       await page.waitForTimeout(1500);
     } catch (_) {}
-    await insertImage(page, '▼CHART▼', chartPath || null);
+    const chartEmbedded = await insertImage(page, '▼CHART▼', chartPath || null);
 
     await closeCropModalIfOpen(page);
 
@@ -399,7 +402,9 @@ async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath }
     }
 
     await context.storageState({ path: SESSION_FILE });
-    return { success: true, url: finalUrl };
+    // historyEmbedded/chartEmbedded: 対応するchartPathが渡されなかった場合はinsertImage()が
+    // false（画像なし→マーカー除去のみ）を返す。呼び出し元は渡したパスの有無と合わせて判定すること。
+    return { success: true, url: finalUrl, historyEmbedded, chartEmbedded };
 
   } catch (err) {
     try {

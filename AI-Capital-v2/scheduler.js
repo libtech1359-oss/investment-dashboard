@@ -125,7 +125,11 @@ async function executeWeekly(schedule) {
     } else {
       await notify(`⚠️ ${schedule.name}: note.com 下書き保存に失敗しました（本文は生成済み）`);
     }
-    await notify(`✅ ${schedule.name} 完了`);
+    if (result.chartsIncomplete) {
+      await notify(`⚠️ ${schedule.name} 完了（グラフ埋め込み${result.graphsEmbedded}/1枚・要確認）`);
+    } else {
+      await notify(`✅ ${schedule.name} 完了`);
+    }
   } catch (err) {
     writeError('scheduler', err);
     await notify(`❌ ${schedule.name} エラー: ${err.message}`);
@@ -181,6 +185,8 @@ async function execute(schedule) {
 
     if (result.article?.validationFailed) {
       await notify(`⚠️ ${schedule.name} 完了（記事は整合性チェック失敗のため未公開）`);
+    } else if (result.article?.chartsIncomplete) {
+      await notify(`⚠️ ${schedule.name} 完了（グラフ埋め込み${result.article.graphsEmbedded}/2枚・要確認）`);
     } else {
       await notify(`✅ ${schedule.name} 完了`);
     }
