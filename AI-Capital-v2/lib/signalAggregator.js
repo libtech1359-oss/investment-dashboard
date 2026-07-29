@@ -28,7 +28,9 @@
  *   + allocationAdjust（② config/targetAllocation.js の目標配分との乖離。不足なら加点・超過なら減点）
  *   + cooldownAdjust（③ 直近の連続購入を減点。ただしRule Engineが強い日は無効化される）
  *   + orderAssist（規則エンジンの推奨第1候補への極小の後押し）
- *   + balanceAdjust（④ 直近 final_decisions での採用履歴が偏っている銘柄を軽く減点。
+ *   + categoryAdjust（④ Core資産（オルカン・S&P500）への僅かな後押し。長期資産形成のため、
+ *     僅差の場合にCore資産が選ばれやすくなるよう config/categoryBonus.js で設定）
+ *   + balanceAdjust（⑤ 直近 final_decisions での採用履歴が偏っている銘柄を軽く減点。
  *     config/candidatePenalty.js で設定。禁止ではなく僅差の場合のみ他候補に機会を残す補正）
  *   をそれぞれ ±config/decisionWeights.js の範囲で加算する。
  *   重みは config/decisionWeights.js（採用履歴補正は config/candidatePenalty.js）で管理する
@@ -46,6 +48,7 @@
 const sheets            = require('./sheets');
 const W                 = require('../config/decisionWeights');
 const TARGET_ALLOCATION = require('../config/targetAllocation');
+const CB                = require('../config/categoryBonus');
 const CP                = require('../config/candidatePenalty');
 
 const SIGNAL_WEIGHT = {
@@ -258,7 +261,12 @@ async function run(date) {
 
           const orderAssist = rank === 1 ? W.RANK_ORDER_ASSIST : 0;
 
-          // ④ 採用履歴補正: 直近CP.LOOKBACK_DECISIONS件のfinal_decisionsで同一銘柄が
+          // ④ 資産カテゴリ補正: Core資産（オルカン・S&P500）への僅かな後押し。
+          //    長期資産形成の観点から、僅差の場合にCore資産が選ばれやすくする。
+          //    config/categoryBonus.js で設定（日経平均は意図的に対象外。同ファイル参照）。
+          const categoryAdjust = CB.CORE_ASSETS.includes(c.asset_name) ? CB.CORE_BONUS : 0;
+
+          // ⑤ 採用履歴補正: 直近CP.LOOKBACK_DECISIONS件のfinal_decisionsで同一銘柄が
           //    繰り返し採用されているほど軽く減点する（採用回数に比例、線形）。
           //    MIN_OCCURRENCES未満（＝1回程度）は自然な選択として補正しない。
           //    禁止ではなく、他候補との差が僅差の場合のみ結果を左右する弱い補正にする。
@@ -268,19 +276,24 @@ async function run(date) {
             : 0;
 
           const combined = voteScore * W.DEPT_BASE_WEIGHT + ruleAdjust
-            + holdingRatioAdjust + allocationAdjust + cooldownAdjust + orderAssist + balanceAdjust;
+            + holdingRatioAdjust + allocationAdjust + cooldownAdjust + orderAssist + categoryAdjust + balanceAdjust;
 
           return {
             asset_name: c.asset_name,
             combined, rankScore, voteScore, ruleAdjust,
             holdingRatioAdjust, holdingRatioPct, allocationAdjust, targetAllocPct, currentAllocPct,
-            cooldownAdjust, orderAssist, balanceAdjust, balanceOccurrences,
+            cooldownAdjust, orderAssist, categoryAdjust, balanceAdjust, balanceOccurrences,
             deptCount:      matchedRecs.length,
             matchedAmounts: matchedRecs.map(r => parseInt(r.amount || 0)),
           };
         });
 
-        // ④ 採用履歴補正のログ（透明性確保: 補正が適用された銘柄のみ出力）
+        // ④⑤ カテゴリ・採用履歴補正のログ（透明性確保: 補正が適用された銘柄のみ出力）
+        scored
+          .filter(s => s.categoryAdjust !== 0)
+          .forEach(s => {
+            console.log(`[signalAggregator] Category Bonus: ${s.asset_name} +${s.categoryAdjust.toFixed(3)}（Core資産）`);
+          });
         scored
           .filter(s => s.balanceAdjust !== 0)
           .forEach(s => {
@@ -295,7 +308,7 @@ async function run(date) {
 
         // ログ出力（上位3件）
         const top3 = scored.slice(0, 3)
-          .map(s => `${s.asset_name}(combined=${s.combined.toFixed(3)} vote=${s.voteScore.toFixed(3)} rule=${s.ruleAdjust>=0?'+':''}${s.ruleAdjust.toFixed(3)} hold=${s.holdingRatioAdjust.toFixed(3)} alloc=${s.allocationAdjust>=0?'+':''}${s.allocationAdjust.toFixed(3)}(目標${s.targetAllocPct}%/現在${s.currentAllocPct.toFixed(1)}%) cooldown=${s.cooldownAdjust.toFixed(3)} order=+${s.orderAssist.toFixed(3)} balance=${s.balanceAdjust.toFixed(3)}(${s.balanceOccurrences}/${CP.LOOKBACK_DECISIONS}) n=${s.deptCount})`)
+          .map(s => `${s.asset_name}(combined=${s.combined.toFixed(3)} vote=${s.voteScore.toFixed(3)} rule=${s.ruleAdjust>=0?'+':''}${s.ruleAdjust.toFixed(3)} hold=${s.holdingRatioAdjust.toFixed(3)} alloc=${s.allocationAdjust>=0?'+':''}${s.allocationAdjust.toFixed(3)}(目標${s.targetAllocPct}%/現在${s.currentAllocPct.toFixed(1)}%) cooldown=${s.cooldownAdjust.toFixed(3)} order=+${s.orderAssist.toFixed(3)} category=+${s.categoryAdjust.toFixed(3)} balance=${s.balanceAdjust.toFixed(3)}(${s.balanceOccurrences}/${CP.LOOKBACK_DECISIONS}) n=${s.deptCount})`)
           .join(' / ');
         console.log(`[signalAggregator] 銘柄スコア上位3: ${top3} (VIX減衰=${vixDamp})`);
 

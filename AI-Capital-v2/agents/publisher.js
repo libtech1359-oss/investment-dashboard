@@ -75,6 +75,17 @@ const GAI_ANGLES = [
   '整合性（部署間の主張に矛盾がないか）',
 ];
 
+// 記事の🎯本日の買付候補セクション用の表示分類（2026-07-29追加）。
+// config/categoryBonus.js のCoreボーナス対象とは別軸の「表示用グルーピング」であることに注意。
+// 日経平均はCoreボーナス対象外だが、表示上はCore候補枠に含める（オルカン・S&P500と並べて
+// 最上位1件を提示。管理者確認済み）。宇宙開発はTheme枠が未整備のため候補表示には出さない
+// （Rule Engineの採点・最終判断ロジックには引き続き参加する）。
+const CANDIDATE_DISPLAY_GROUPS = {
+  core:    ['オルカン', 'S&P500', '日経平均'],
+  growth:  ['NASDAQ100', 'FANG+', 'SOX', 'Zテック20'],
+  defense: ['ゴールド'],
+};
+
 // 10日以上前の画像ファイルを自動削除
 function pruneOldImages() {
   const RETAIN_DAYS = 10;
@@ -589,31 +600,46 @@ async function buildContext(date, decisions, votes, recs) {
     }
   }
 
-  // 買付候補
+  // 買付候補（🥇Core / 🚀Growth / 🛡Defense の3カテゴリからそれぞれ最上位候補を提示。
+  // カテゴリ分類は表示用の CANDIDATE_DISPLAY_GROUPS を使用し、config/categoryBonus.js の
+  // Coreボーナス対象とは別軸。ボーナスの有無に関わらず、その日のRank最上位を紹介する）
   if (candidates.length > 0) {
     const totalForRatio = parseInt(pf?.total_assets ?? 0);
-    const sorted = [...candidates].sort((a, b) => parseInt(a.rank || 99) - parseInt(b.rank || 99));
-    const top = sorted[0];
-    const candLines = sorted.map(c => {
+    // 注: cost_basis は取得原価の総額（円）、current_nav は口当たり基準価格のため、
+    // 両者を直接比較する「前回購入価格比」は単位が異なり異常値（例: -98%）を生む。算出せずコンテキストから外す。
+    const heldStr = c => {
+      const held = positions.find(p => p.asset_name === c.asset_name);
+      if (!held) return '';
+      const ratio = totalForRatio > 0 ? (parseFloat(held.market_value || 0) / totalForRatio * 100).toFixed(1) : null;
+      return ratio != null ? ` [既存保有: ポートフォリオ比率${ratio}%]` : '';
+    };
+    const fmtCandidate = c => {
       const fullLabel = c.full_name ? `（${c.full_name}）` : '';
       const navLabel  = c.nav_ok === 'FALSE' ? ' ※基準価格データ未蓄積' : '';
-      // 既存保有銘柄なら「ポートフォリオ比率」を追加提示（AIらしい根拠付け用）
-      // 注: cost_basis は取得原価の総額（円）、current_nav は口当たり基準価格のため、
-      // 両者を直接比較する「前回購入価格比」は単位が異なり異常値（例: -98%）を生む。算出せずコンテキストから外す。
-      const held = positions.find(p => p.asset_name === c.asset_name);
-      let heldStr = '';
-      if (held) {
-        const ratio = totalForRatio > 0 ? (parseFloat(held.market_value || 0) / totalForRatio * 100).toFixed(1) : null;
-        if (ratio != null) heldStr = ` [既存保有: ポートフォリオ比率${ratio}%]`;
-      }
-      return `・Rank${c.rank} ${c.asset_name}${fullLabel}: ATH乖離${c.ath_gap_pct}% 前日比${c.daily_change_pct}% スコア${c.score}${navLabel}${heldStr}`;
-    });
-    const topFull = top.full_name ? `（${top.full_name}）` : '';
-    lines.push(
-      `【本日の買付候補（規則エンジン算出済み）】\n` +
-      `推奨第1候補: ${top.asset_name}${topFull}\n` +
-      candLines.join('\n')
-    );
+      return `${c.asset_name}${fullLabel}: ATH乖離${c.ath_gap_pct}% 前日比${c.daily_change_pct}% スコア${c.score}（Rank${c.rank}）${navLabel}${heldStr(c)}`;
+    };
+    const topOfGroup = names => {
+      const inGroup = candidates.filter(c => names.includes(c.asset_name));
+      if (inGroup.length === 0) return null;
+      return [...inGroup].sort((a, b) => parseInt(a.rank || 99) - parseInt(b.rank || 99))[0];
+    };
+
+    const coreTop    = topOfGroup(CANDIDATE_DISPLAY_GROUPS.core);
+    const growthTop  = topOfGroup(CANDIDATE_DISPLAY_GROUPS.growth);
+    const defenseTop = topOfGroup(CANDIDATE_DISPLAY_GROUPS.defense);
+
+    const groupLines = [];
+    if (coreTop)    groupLines.push(`🥇 Core候補: ${fmtCandidate(coreTop)}`);
+    if (growthTop)  groupLines.push(`🚀 Growth候補: ${fmtCandidate(growthTop)}`);
+    if (defenseTop) groupLines.push(`🛡 Defense候補: ${fmtCandidate(defenseTop)}`);
+
+    if (groupLines.length > 0) {
+      lines.push(
+        `【本日の買付候補（規則エンジン算出済み・カテゴリ別。表示上のカテゴリ分けであり、\n` +
+        `Coreだから優遇するという意味ではない。実際の採否は⚖️最終判断セクションに従うこと）】\n` +
+        groupLines.join('\n')
+      );
+    }
   }
 
   // 各部署の最終提案（agent_recommendations / department_recommendations）

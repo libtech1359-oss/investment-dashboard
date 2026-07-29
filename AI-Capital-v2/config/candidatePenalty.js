@@ -13,7 +13,8 @@
  *   1. 市場データ（ATH乖離率・Fear&Greed・前日比など） … lib/signalAggregator.js の ruleAdjust
  *   2. Rule Engine（candidate_assetsの総合評価） … ruleAdjust
  *   3. ポートフォリオ状況（保有比率・目標配分・直近購入） … holdingRatioAdjust / allocationAdjust / cooldownAdjust
- *   4. 採用履歴補正（本ファイル） … balanceAdjust ← 最も弱い補正
+ *   4. 資産カテゴリ補正（config/categoryBonus.js） … categoryAdjust
+ *   5. 採用履歴補正（本ファイル） … balanceAdjust ← 最も弱い補正
  *   優位性が十分にある候補は、採用履歴補正だけでは逆転しない値に留めること
  *   （MAX_PENALTY は decisionWeights.js の各補正値より小さく保つ）。
  *
