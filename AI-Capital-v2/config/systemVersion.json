@@ -1,11 +1,21 @@
 {
-  "version": "2.1.0",
-  "updated_at": "2026-07-27 21:34:39",
+  "version": "2.3.0",
+  "updated_at": "2026-07-29 21:23:52",
   "history": [
     {
       "version": "2.1.0",
       "date": "2026-07-27 21:34:39",
       "reason": "AI Capital v2: 週次テンプレート化・記事品質Phase1-5・Rule12誤検知修正をまとめてコミット"
+    },
+    {
+      "version": "2.2.0",
+      "date": "2026-07-28 20:50:43",
+      "reason": "feat: add candidate balance adjustment to reduce repetitive asset selection"
+    },
+    {
+      "version": "2.3.0",
+      "date": "2026-07-29 21:23:52",
+      "reason": "feat: add Core asset category bonus and category-grouped candidate display"
     }
   ]
 }
