@@ -1,6 +1,6 @@
 {
-  "version": "2.5.0",
-  "updated_at": "2026-08-01 13:31:28",
+  "version": "2.6.0",
+  "updated_at": "2026-08-01 13:40:23",
   "history": [
     {
       "version": "2.1.0",
@@ -26,6 +26,11 @@
       "version": "2.5.0",
       "date": "2026-08-01 13:31:28",
       "reason": "feat(decision): add secretary tie-break for 2-2 department votes"
+    },
+    {
+      "version": "2.6.0",
+      "date": "2026-08-01 13:40:23",
+      "reason": "feat(decision): add Observation Candidate Filter for long-term asset preference"
     }
   ]
 }

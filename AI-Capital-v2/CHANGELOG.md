@@ -2,6 +2,9 @@
 
 AI Capitalの開発履歴。development_logsで自動検出された重大変更のみを記録する（新しい順）。
 
+## v2.6 (2026-08-01)
+- feat(decision): add Observation Candidate Filter for long-term asset preference（Rule Engine変更）
+
 ## v2.5 (2026-08-01)
 - feat(decision): add secretary tie-break for 2-2 department votes（Rule Engine変更）
 
