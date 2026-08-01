@@ -28,6 +28,15 @@
  *   （evaluateObservationOverride関数、閾値は config/decisionWeights.js の OBSERVATION_*）。
  *   ただしHARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は対象外。
  *
+ * 秘書室長タイブレーク（2026-08-02〜）:
+ *   4部署の投票がACCUMULATE:2/WAIT:2の同票になった場合のみ、上の加重多数決（正規化スコア）
+ *   を終了し秘書室長が最終裁定する（evaluateSecretaryTieBreak関数）。3対1・4対0等の通常の
+ *   多数決結果は変更しない。Fear&Greed<=50・Rule Engine上位候補score>=0.70・現金比率>=50%を
+ *   全て満たせばACCUMULATE、満たさなければWAIT（閾値は config/decisionWeights.js の TIEBREAK_*）。
+ *   HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗・重大リスク
+ *   イベント）を検知した場合はタイブレークを実施せずWAITを返す。実行時は必ず
+ *   `[Decision]`ブロックのログを出力する（部署投票内訳・裁定理由・結果）。
+ *
  * 銘柄選択ロジック（部署の議論を中心に、客観指標・ポートフォリオ全体最適化は「補正」として加える構造）:
  *   voteScore（部署の信頼度加重支持率, 0〜1）を基礎スコアとし、
  *   + ruleAdjust（Rule Engine: candidate_assetsの総合評価スコアランク。VIXが高いほど発言力を弱める。
@@ -100,15 +109,22 @@ function safeParseJson(str, fallback) {
   catch { return fallback; }
 }
 
+// HARD RULE検知: 各部署の投票コメントからシステム異常/エラー/安全側WAIT（システム異常・
+// 監査エラー・portfolio_status異常でLLMを呼ばず即時WAIT投票したケース等）を検出する。
+// evaluateObservationOverride・evaluateSecretaryTieBreak共通で使用する。
+function detectHardIssue(votes) {
+  return votes.find(v => {
+    const comment = String(v.comment || '');
+    return comment.includes('JSON解析失敗') || comment.includes('分析スキップ') || parseFloat(v.confidence) === 0;
+  }) || null;
+}
+
 // WAIT見送り防止: 現金余力がありリスクが許容範囲内なら、WAITではなく小額の観測
 // ポジション構築（ACCUMULATE）へ切り替えるべきか判定する。
 // HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は対象外のまま維持する
 // （エラー/安全側WAIT投票を検知した時点で即座に見送る）。
 async function evaluateObservationOverride(date, votes) {
-  const hardIssue = votes.find(v => {
-    const comment = String(v.comment || '');
-    return comment.includes('JSON解析失敗') || comment.includes('分析スキップ') || parseFloat(v.confidence) === 0;
-  });
+  const hardIssue = detectHardIssue(votes);
   if (hardIssue) return { ok: false, reason: `${hardIssue.department}でシステム異常/エラーを検知` };
 
   const [pf, mkt] = await Promise.all([
@@ -157,6 +173,91 @@ async function evaluateObservationOverride(date, votes) {
   ) * 10000;
 
   return { ok: true, cashRatio, amount, pf, mkt, candidates };
+}
+
+// 秘書室長タイブレーク: 4部署の投票がACCUMULATE:2/WAIT:2の同票になった場合のみ適用し、
+// 通常の加重多数決（Step1の正規化スコア判定）を終了して秘書室長が最終裁定する。
+// 3対1・4対0等の同票以外はnullを返して対象外とする。
+// HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗・重大リスク
+// イベント）を検知した場合はタイブレークを実施せずWAITを返す。
+async function evaluateSecretaryTieBreak(date, votes) {
+  const signalCounts = {};
+  for (const v of votes) {
+    const s = (v.signal ?? '').toUpperCase();
+    signalCounts[s] = (signalCounts[s] || 0) + 1;
+  }
+  const isTied = votes.length === 4 && signalCounts.ACCUMULATE === 2 && signalCounts.WAIT === 2;
+  if (!isTied) return null;
+
+  console.log('[Decision]');
+  console.log('Department Vote');
+  console.log(`ACCUMULATE : ${signalCounts.ACCUMULATE}`);
+  console.log(`WAIT : ${signalCounts.WAIT}`);
+  console.log('Tie Break');
+
+  const fail = (label, ...reasonLines) => {
+    console.log(`Secretary Decision : WAIT`);
+    console.log('Reason');
+    reasonLines.forEach(line => console.log(line));
+    console.log('Result : WAIT');
+    return {
+      decision: 'WAIT',
+      note: `部署投票は2対2で同票となりましたが、${label}ため秘書室長タイブレークを適用せずWAITと判断しました。`,
+    };
+  };
+
+  const hardIssue = detectHardIssue(votes);
+  if (hardIssue) return fail('HARD RULE（システム異常/エラー）を検知した', `HARD RULE: ${hardIssue.department}でシステム異常/エラーを検知`);
+
+  const [pf, mkt] = await Promise.all([
+    sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
+    sheets.getLatestRowAsOf('market_data', date).catch(() => null),
+  ]);
+  if (!pf)  return fail('HARD RULE（portfolio_status取得不可）に該当した', 'HARD RULE: portfolio_status取得不可');
+  if (!mkt) return fail('HARD RULE（市場データ取得不可）に該当した', 'HARD RULE: 市場データ取得不可');
+
+  const cashRatio = parseFloat(pf.cash_ratio ?? 0);
+  const vix       = parseFloat(mkt.vix ?? 0);
+  const nasdaq    = parseFloat(mkt.nasdaq100 ?? 0);
+  const fg        = parseFloat(mkt.fear_greed ?? 50);
+
+  // 重大リスクイベント判定はOBSERVATION_MAX_VIX/OBSERVATION_MAX_NASDAQ_DROP_PCTを流用
+  // （risk.jsの高リスク基準と同水準に揃えるため。config/decisionWeights.js参照）
+  if (vix >= W.OBSERVATION_MAX_VIX || (nasdaq <= W.OBSERVATION_MAX_NASDAQ_DROP_PCT && vix >= 25)) {
+    return fail('HARD RULE（重大リスクイベント）を検知した', `HARD RULE: 重大リスクイベント（VIX${vix} NASDAQ前日比${nasdaq}%）`);
+  }
+
+  const candidates = await sheets.getRowsByDate('candidate_assets', date).catch(() => []);
+  const sorted     = [...candidates].sort((a, b) => (parseInt(a.rank) || 99) - (parseInt(b.rank) || 99));
+  const top        = sorted[0];
+  const ruleScore  = top ? parseFloat(top.score ?? 0) : null;
+
+  const meetsFg   = fg <= W.TIEBREAK_MAX_FEAR_GREED;
+  const meetsRule = ruleScore !== null && ruleScore >= W.TIEBREAK_MIN_RULE_SCORE;
+  const meetsCash = cashRatio >= W.TIEBREAK_MIN_CASH_RATIO_PCT;
+  const ok        = meetsFg && meetsRule && meetsCash;
+
+  const decision = ok ? 'ACCUMULATE' : 'WAIT';
+  console.log(`Secretary Decision : ${decision}`);
+  console.log('Reason');
+  console.log(`Fear & Greed : ${fg}`);
+  console.log(`Rule Score : ${ruleScore !== null ? ruleScore.toFixed(2) : 'N/A'}`);
+  console.log(`Cash Ratio : ${cashRatio.toFixed(1)}%`);
+  if (!ok) {
+    const unmet = [];
+    if (!meetsFg)   unmet.push(`Fear&Greed${fg}が上限${W.TIEBREAK_MAX_FEAR_GREED}超`);
+    if (!meetsRule) unmet.push(`Rule Score${ruleScore !== null ? ruleScore.toFixed(2) : 'N/A'}が下限${W.TIEBREAK_MIN_RULE_SCORE}未満`);
+    if (!meetsCash) unmet.push(`現金比率${cashRatio.toFixed(1)}%が下限${W.TIEBREAK_MIN_CASH_RATIO_PCT}%未満`);
+    console.log(`条件未達: ${unmet.join(' / ')}`);
+  }
+  console.log(`Result : ${ok ? 'Observation Position' : 'WAIT'}`);
+
+  return {
+    decision, cashRatio, fg, ruleScore, pf, mkt, candidates,
+    note: ok
+      ? '部署投票は2対2で同票となりました。秘書室長タイブレークルールを適用し、Fear & Greed・Rule Engine評価・現金比率を総合判断した結果、観測ポジション構築と判断しました。'
+      : '部署投票は2対2で同票となりましたが、秘書室長タイブレークの条件（Fear & Greed・Rule Engine評価・現金比率）を満たさなかったため、WAITと判断しました。',
+  };
 }
 
 // agent_recommendationsの資産名（短名/フルネームどちらでも可）とcandidate_assetsの
@@ -208,6 +309,23 @@ async function run(date) {
   else if (normalizedScore >= -1.0) final_signal = 'DEFEND';
   else                               final_signal = 'SELL';
 
+  // ── Step 1.4: 秘書室長タイブレーク（ACCUMULATE:2/WAIT:2の同票時のみ）────
+  // 通常の加重多数決（正規化スコア）を終了し、上のfinal_signalを裁定結果で上書きする。
+  // 3対1・4対0等の同票以外はnullが返り、final_signalは変更しない。
+  let tieBreakCache = null; // 裁定でACCUMULATEになった場合のpf/mkt/candidatesをStep2で再利用
+  let tieBreakNote  = '';
+  let waitReasonOverride = '';
+  const tieBreakResult = await evaluateSecretaryTieBreak(date, votes);
+  if (tieBreakResult) {
+    final_signal = tieBreakResult.decision;
+    if (tieBreakResult.decision === 'ACCUMULATE') {
+      tieBreakCache = tieBreakResult;
+      tieBreakNote  = tieBreakResult.note;
+    } else {
+      waitReasonOverride = tieBreakResult.note;
+    }
+  }
+
   // ── Step 1.5: WAIT見送り防止（観測ポジション構築への切替判定）─────
   // 現金比率70%以上・投資可能資金あり・Rule Engine上位候補が僅差・重大リスクなし・
   // Fear&GreedがExtreme Greedでない、を全て満たす場合のみWAIT→ACCUMULATEへ切り替える。
@@ -241,14 +359,16 @@ async function run(date) {
       const balanceStart = addDays(date, -(CP.LOOKBACK_DECISIONS * 3));
       const balanceEnd    = addDays(date, -1);
 
-      // observationがあれば評価済みのpf/mkt/candidatesを再利用し、Sheets再取得を避ける
+      // observation（WAIT見送り防止）またはtieBreakCache（タイブレーク）があれば
+      // 評価済みのpf/mkt/candidatesを再利用し、Sheets再取得を避ける
+      const reuseData = observation || tieBreakCache;
       const [candidates, recs, pf, mkt, recentOrders, recentDecisions] = await Promise.all([
-        observation ? Promise.resolve(observation.candidates) : sheets.getRowsByDate('candidate_assets', date),
+        reuseData ? Promise.resolve(reuseData.candidates) : sheets.getRowsByDate('candidate_assets', date),
         sheets.getRowsByDate('agent_recommendations', date)
           .then(r => r.length > 0 ? r : sheets.getRowsByDate('department_recommendations', date))
           .catch(() => []),
-        observation ? Promise.resolve(observation.pf)  : sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
-        observation ? Promise.resolve(observation.mkt) : sheets.getLatestRowAsOf('market_data', date).catch(() => null),
+        reuseData ? Promise.resolve(reuseData.pf)  : sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
+        reuseData ? Promise.resolve(reuseData.mkt) : sheets.getLatestRowAsOf('market_data', date).catch(() => null),
         sheets.getRowsByDateRange('orders', cooldownStart, cooldownEnd).catch(() => []),
         sheets.getRowsByDateRange('final_decisions', balanceStart, balanceEnd).catch(() => []),
       ]);
@@ -441,6 +561,8 @@ async function run(date) {
 
         if (observation) {
           assetReason = `${assetReason} ${overrideNote}`.trim();
+        } else if (tieBreakCache) {
+          assetReason = `${assetReason} ${tieBreakNote}`.trim();
         }
       }
     } catch (e) {
@@ -451,7 +573,7 @@ async function run(date) {
 
   // reasonは記事にそのまま表示されるため、内部スコア・信頼度・部署一覧などのデバッグ情報を
   // 含めない平易な日本語のみとする（詳細な内訳はconsole.logの銘柄スコア上位3行に残す）。
-  const signalReason = `各部署の投票を総合し、${SIGNAL_LABEL_JA[final_signal] || final_signal}と判断しました。`;
+  const signalReason = waitReasonOverride || `各部署の投票を総合し、${SIGNAL_LABEL_JA[final_signal] || final_signal}と判断しました。`;
   const reason        = assetReason || signalReason;
 
   const result = { date, final_signal, target_asset, amount, reason };

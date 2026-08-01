@@ -59,4 +59,16 @@ module.exports = {
   OBSERVATION_MAX_VIX:             30,      // VIXがこれ以上なら高リスク局面としてWAITを維持（risk.jsの高リスク基準と同水準）
   OBSERVATION_MAX_NASDAQ_DROP_PCT: -3,      // NASDAQ前日比がこれ以下 かつ VIX>=25 なら高リスク局面
   OBSERVATION_MAX_FEAR_GREED:      75,      // Fear&GreedがこれよりExtreme Greed（>75）ならWAITを維持
+
+  // ── 秘書室長タイブレーク（2026-08-02〜）───────────────────────
+  // 4部署の投票がACCUMULATE:2/WAIT:2の同票になった場合のみ適用。通常の加重多数決
+  // （Step1の正規化スコア判定）を終了し、秘書室長が以下の条件で最終裁定する
+  // （lib/signalAggregator.js evaluateSecretaryTieBreak）。3対1・4対0等の同票以外は対象外。
+  // 重大リスクイベントの判定はOBSERVATION_MAX_VIX/OBSERVATION_MAX_NASDAQ_DROP_PCTを流用する
+  // （risk.jsの高リスク基準と同水準に揃えるため）。
+  // HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗・重大リスク
+  // イベント）は対象外のままタイブレークを実施せずWAITを維持する。
+  TIEBREAK_MAX_FEAR_GREED:     50,   // Fear&Greedがこれ以下ならACCUMULATE方向の条件を満たす
+  TIEBREAK_MIN_RULE_SCORE:     0.70, // Rule Engine上位候補(rank1)のscoreがこれ以上
+  TIEBREAK_MIN_CASH_RATIO_PCT: 50,   // 現金比率がこれ以上
 };
