@@ -71,4 +71,13 @@ module.exports = {
   TIEBREAK_MAX_FEAR_GREED:     50,   // Fear&Greedがこれ以下ならACCUMULATE方向の条件を満たす
   TIEBREAK_MIN_RULE_SCORE:     0.70, // Rule Engine上位候補(rank1)のscoreがこれ以上
   TIEBREAK_MIN_CASH_RATIO_PCT: 50,   // 現金比率がこれ以上
+
+  // ── Observation Candidate Filter（2026-08-03〜）───────────────
+  // 観測ポジションモード（WAIT見送り防止・秘書室長タイブレークでACCUMULATEになった場合）
+  // でのみ適用。Rule Engine上位候補（candidate_assets.score）の差がこの値以内の場合のみ、
+  // config/longTermPriority.js の優先度リストに基づいて銘柄を選び直す
+  // （lib/signalAggregator.js applyObservationCandidateFilter）。差が大きい場合は
+  // Rule Engine順位（最高スコア銘柄）をそのまま維持する。通常の加重多数決によるBUY/
+  // ACCUMULATE（部署の議論が中心のケース）には適用しない。
+  OBSERVATION_FILTER_MAX_SCORE_GAP: 0.03,
 };

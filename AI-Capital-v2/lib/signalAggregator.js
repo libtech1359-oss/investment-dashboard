@@ -37,6 +37,15 @@
  *   イベント）を検知した場合はタイブレークを実施せずWAITを返す。実行時は必ず
  *   `[Decision]`ブロックのログを出力する（部署投票内訳・裁定理由・結果）。
  *
+ * Observation Candidate Filter（2026-08-03〜）:
+ *   観測ポジションモード（WAIT見送り防止・秘書室長タイブレークでACCUMULATEになった場合）
+ *   でのみ適用する最終フィルター（applyObservationCandidateFilter関数）。Rule Engine上位
+ *   候補（candidate_assets.score）の差がconfig/decisionWeights.jsのOBSERVATION_FILTER_MAX_SCORE_GAP
+ *   以内の場合のみ、その僅差グループの中からconfig/longTermPriority.jsの優先度が最も高い
+ *   （長期保有向きの）銘柄へ選び直す。差が大きい場合はRule Engine順位（最高スコア銘柄）を
+ *   そのまま維持する。通常の加重多数決によるBUY/ACCUMULATE（部署の議論が中心のケース）には
+ *   適用しない。適用時は必ずconsole.logへ出力する。
+ *
  * 銘柄選択ロジック（部署の議論を中心に、客観指標・ポートフォリオ全体最適化は「補正」として加える構造）:
  *   voteScore（部署の信頼度加重支持率, 0〜1）を基礎スコアとし、
  *   + ruleAdjust（Rule Engine: candidate_assetsの総合評価スコアランク。VIXが高いほど発言力を弱める。
@@ -62,11 +71,12 @@
  *   勝利銘柄を推薦した部署の平均額（推薦なし時は cash × 3%）
  */
 
-const sheets            = require('./sheets');
-const W                 = require('../config/decisionWeights');
-const TARGET_ALLOCATION = require('../config/targetAllocation');
-const CB                = require('../config/categoryBonus');
-const CP                = require('../config/candidatePenalty');
+const sheets              = require('./sheets');
+const W                   = require('../config/decisionWeights');
+const TARGET_ALLOCATION   = require('../config/targetAllocation');
+const CB                  = require('../config/categoryBonus');
+const CP                  = require('../config/candidatePenalty');
+const LONG_TERM_PRIORITY  = require('../config/longTermPriority');
 
 const SIGNAL_WEIGHT = {
   BUY: 2.0, ACCUMULATE: 1.0, WAIT: 0.0, DEFEND: -1.0, SELL: -2.0,
@@ -119,6 +129,44 @@ function detectHardIssue(votes) {
   }) || null;
 }
 
+// Observation Candidate Filter: 観測ポジションモード（WAIT見送り防止・秘書室長タイブレーク）
+// でのみ適用する最終フィルター。Rule Engine上位候補のスコア差が
+// config/decisionWeights.js の OBSERVATION_FILTER_MAX_SCORE_GAP 以内の場合のみ、
+// その僅差グループの中から config/longTermPriority.js の優先度が最も高い銘柄を選び直す。
+// 差が大きい場合や僅差グループが1件以下の場合はnullを返し、Rule Engine順位
+// （最高スコア銘柄）をそのまま維持する（Rule Engineの評価そのものを覆すものではない）。
+function applyObservationCandidateFilter(sortedCandidates) {
+  if (!sortedCandidates || sortedCandidates.length === 0) return null;
+
+  const top      = sortedCandidates[0];
+  const topScore = parseFloat(top.score ?? 0);
+  const nearTied = sortedCandidates.filter(c =>
+    Math.abs(topScore - parseFloat(c.score ?? 0)) <= W.OBSERVATION_FILTER_MAX_SCORE_GAP);
+  if (nearTied.length < 2) return null;
+
+  let selected  = null;
+  let bestRank  = Infinity;
+  for (const c of nearTied) {
+    const idx = LONG_TERM_PRIORITY.indexOf(c.asset_name);
+    const effectiveRank = idx === -1 ? Infinity : idx;
+    if (effectiveRank < bestRank) { bestRank = effectiveRank; selected = c; }
+  }
+  if (!selected || selected.asset_name === top.asset_name) return null;
+
+  console.log('Observation Candidate Filter');
+  console.log('Rule Engine Top');
+  nearTied.forEach(c => console.log(`${c.asset_name} ${parseFloat(c.score ?? 0).toFixed(2)}`));
+  console.log(`Difference ${Math.abs(topScore - parseFloat(selected.score ?? 0)).toFixed(2)}`);
+  console.log('Long-term Preference Applied');
+  console.log('Selected');
+  console.log(selected.asset_name);
+
+  return {
+    asset_name: selected.asset_name,
+    note: `Rule Engineでは複数銘柄が僅差で評価されました。AI Capitalでは長期資産形成を重視するため、観測ポジションとして${selected.asset_name}を選択しました。`,
+  };
+}
+
 // WAIT見送り防止: 現金余力がありリスクが許容範囲内なら、WAITではなく小額の観測
 // ポジション構築（ACCUMULATE）へ切り替えるべきか判定する。
 // HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は対象外のまま維持する
@@ -161,18 +209,27 @@ async function evaluateObservationOverride(date, votes) {
   if (gapPct > W.OBSERVATION_MAX_SCORE_GAP_PCT)
     return { ok: false, reason: `Rule Engine上位候補のスコア差が大きい(${gapPct.toFixed(1)}%)` };
 
+  // Observation Candidate Filter: 僅差グループがあれば長期保有優先度の高い銘柄へ差し替える
+  // （保有比率上限チェックも、実際に採用予定の銘柄に対して行う）
+  const filter             = applyObservationCandidateFilter(sorted);
+  const effectiveAssetName = filter ? filter.asset_name : sorted[0].asset_name;
+
   const positions       = safeParseJson(pf.positions_json, []);
   const totalAssets     = parseFloat(pf.total_assets ?? 0);
-  const held            = positions.find(p => (p.name || p.asset_name) === sorted[0].asset_name);
+  const held            = positions.find(p => (p.name || p.asset_name) === effectiveAssetName);
   const holdingRatioPct = (held && totalAssets > 0) ? parseFloat(held.market_value || 0) / totalAssets * 100 : 0;
   if (holdingRatioPct >= W.OBSERVATION_MAX_HOLDING_RATIO_PCT)
-    return { ok: false, reason: `${sorted[0].asset_name}の保有比率が上限到達(${holdingRatioPct.toFixed(1)}%)` };
+    return { ok: false, reason: `${effectiveAssetName}の保有比率が上限到達(${holdingRatioPct.toFixed(1)}%)` };
 
   const amount = Math.round(
     Math.max(W.OBSERVATION_MIN_AMOUNT, Math.min(W.OBSERVATION_MAX_AMOUNT, cash * 0.05)) / 10000
   ) * 10000;
 
-  return { ok: true, cashRatio, amount, pf, mkt, candidates };
+  return {
+    ok: true, cashRatio, amount, pf, mkt, candidates,
+    filterAsset: filter ? filter.asset_name : null,
+    filterNote:  filter ? filter.note : '',
+  };
 }
 
 // 秘書室長タイブレーク: 4部署の投票がACCUMULATE:2/WAIT:2の同票になった場合のみ適用し、
@@ -252,8 +309,14 @@ async function evaluateSecretaryTieBreak(date, votes) {
   }
   console.log(`Result : ${ok ? 'Observation Position' : 'WAIT'}`);
 
+  // Observation Candidate Filter: ACCUMULATE裁定時のみ、僅差グループがあれば
+  // 長期保有優先度の高い銘柄へ差し替える（gating条件のRule Scoreはrank1のまま変更しない）
+  const filter = ok ? applyObservationCandidateFilter(sorted) : null;
+
   return {
     decision, cashRatio, fg, ruleScore, pf, mkt, candidates,
+    filterAsset: filter ? filter.asset_name : null,
+    filterNote:  filter ? filter.note : '',
     note: ok
       ? '部署投票は2対2で同票となりました。秘書室長タイブレークルールを適用し、Fear & Greed・Rule Engine評価・現金比率を総合判断した結果、観測ポジション構築と判断しました。'
       : '部署投票は2対2で同票となりましたが、秘書室長タイブレークの条件（Fear & Greed・Rule Engine評価・現金比率）を満たさなかったため、WAITと判断しました。',
@@ -508,9 +571,17 @@ async function run(date) {
           });
 
         scored.sort((a, b) => b.combined - a.combined);
-        const winner   = scored[0];
+        let winner     = scored[0];
         const runnerUp = scored[1];
-        target_asset   = winner.asset_name;
+
+        // Observation Candidate Filter: 観測ポジションモード（reuseData有）でフィルターが
+        // 選び直した銘柄があれば、Step2の候補選定結果をその銘柄へ差し替える
+        let filterApplied = false;
+        if (reuseData && reuseData.filterAsset && reuseData.filterAsset !== winner.asset_name) {
+          const filtered = scored.find(s => s.asset_name === reuseData.filterAsset);
+          if (filtered) { winner = filtered; filterApplied = true; }
+        }
+        target_asset = winner.asset_name;
 
         // ログ出力（上位3件）
         const top3 = scored.slice(0, 3)
@@ -563,6 +634,9 @@ async function run(date) {
           assetReason = `${assetReason} ${overrideNote}`.trim();
         } else if (tieBreakCache) {
           assetReason = `${assetReason} ${tieBreakNote}`.trim();
+        }
+        if (filterApplied) {
+          assetReason = `${assetReason} ${reuseData.filterNote}`.trim();
         }
       }
     } catch (e) {
