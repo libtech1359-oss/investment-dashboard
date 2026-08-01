@@ -1,6 +1,6 @@
 {
-  "version": "2.3.0",
-  "updated_at": "2026-07-29 21:23:52",
+  "version": "2.5.0",
+  "updated_at": "2026-08-01 13:31:28",
   "history": [
     {
       "version": "2.1.0",
@@ -16,6 +16,16 @@
       "version": "2.3.0",
       "date": "2026-07-29 21:23:52",
       "reason": "feat: add Core asset category bonus and category-grouped candidate display"
+    },
+    {
+      "version": "2.4.0",
+      "date": "2026-08-01 13:31:02",
+      "reason": "feat(decision): add WAIT-avoidance observation-position override"
+    },
+    {
+      "version": "2.5.0",
+      "date": "2026-08-01 13:31:28",
+      "reason": "feat(decision): add secretary tie-break for 2-2 department votes"
     }
   ]
 }

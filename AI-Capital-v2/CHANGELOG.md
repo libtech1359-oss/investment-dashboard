@@ -2,6 +2,12 @@
 
 AI Capitalの開発履歴。development_logsで自動検出された重大変更のみを記録する（新しい順）。
 
+## v2.5 (2026-08-01)
+- feat(decision): add secretary tie-break for 2-2 department votes（Rule Engine変更）
+
+## v2.4 (2026-08-01)
+- feat(decision): add WAIT-avoidance observation-position override（Rule Engine変更）
+
 ## v2.3 (2026-07-29)
 - feat: add Core asset category bonus and category-grouped candidate display（Rule Engine変更）
 
