@@ -20,6 +20,14 @@
  *   >= -1.0 → DEFEND
  *   <  -1.0 → SELL
  *
+ * WAIT見送り防止（2026-08-01〜）:
+ *   AI Capitalは「リスクを避けるAI」ではなく「適切なリスクを取りながら長期資産形成を行うAI」。
+ *   final_signalがWAITでも、現金比率70%以上・投資可能資金あり・Rule Engine上位候補が僅差・
+ *   重大リスクなし（VIX高騰/NASDAQ急落なし）・Fear&GreedがExtreme Greedでない、を全て満たす
+ *   場合は小額（30〜50万円）の観測ポジション構築（ACCUMULATE）へ切り替える
+ *   （evaluateObservationOverride関数、閾値は config/decisionWeights.js の OBSERVATION_*）。
+ *   ただしHARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は対象外。
+ *
  * 銘柄選択ロジック（部署の議論を中心に、客観指標・ポートフォリオ全体最適化は「補正」として加える構造）:
  *   voteScore（部署の信頼度加重支持率, 0〜1）を基礎スコアとし、
  *   + ruleAdjust（Rule Engine: candidate_assetsの総合評価スコアランク。VIXが高いほど発言力を弱める。
@@ -92,6 +100,65 @@ function safeParseJson(str, fallback) {
   catch { return fallback; }
 }
 
+// WAIT見送り防止: 現金余力がありリスクが許容範囲内なら、WAITではなく小額の観測
+// ポジション構築（ACCUMULATE）へ切り替えるべきか判定する。
+// HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は対象外のまま維持する
+// （エラー/安全側WAIT投票を検知した時点で即座に見送る）。
+async function evaluateObservationOverride(date, votes) {
+  const hardIssue = votes.find(v => {
+    const comment = String(v.comment || '');
+    return comment.includes('JSON解析失敗') || comment.includes('分析スキップ') || parseFloat(v.confidence) === 0;
+  });
+  if (hardIssue) return { ok: false, reason: `${hardIssue.department}でシステム異常/エラーを検知` };
+
+  const [pf, mkt] = await Promise.all([
+    sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
+    sheets.getLatestRowAsOf('market_data', date).catch(() => null),
+  ]);
+  if (!pf)  return { ok: false, reason: 'portfolio_status取得不可' };
+  if (!mkt) return { ok: false, reason: '市場データ取得不可' };
+
+  const cashRatio = parseFloat(pf.cash_ratio ?? 0);
+  const cash      = parseFloat(pf.cash ?? 0);
+  const vix       = parseFloat(mkt.vix ?? 0);
+  const nasdaq    = parseFloat(mkt.nasdaq100 ?? 0);
+  const fg        = parseFloat(mkt.fear_greed ?? 50);
+
+  if (cashRatio < W.OBSERVATION_MIN_CASH_RATIO_PCT)
+    return { ok: false, reason: `現金比率${cashRatio}%が下限(${W.OBSERVATION_MIN_CASH_RATIO_PCT}%)未達` };
+  if (cash < W.OBSERVATION_MIN_AMOUNT)
+    return { ok: false, reason: '投資可能資金不足' };
+  if (vix >= W.OBSERVATION_MAX_VIX)
+    return { ok: false, reason: `VIX${vix}が高リスク水準` };
+  if (nasdaq <= W.OBSERVATION_MAX_NASDAQ_DROP_PCT && vix >= 25)
+    return { ok: false, reason: 'NASDAQ急落とVIX上昇が重なる高リスク局面' };
+  if (fg > W.OBSERVATION_MAX_FEAR_GREED)
+    return { ok: false, reason: `Fear&Greed${fg}がExtreme Greed水準` };
+
+  const candidates = await sheets.getRowsByDate('candidate_assets', date).catch(() => []);
+  if (candidates.length < 2) return { ok: false, reason: '候補銘柄データ不足' };
+
+  const sorted = [...candidates].sort((a, b) => (parseInt(a.rank) || 99) - (parseInt(b.rank) || 99));
+  const top1   = parseFloat(sorted[0].score ?? 0);
+  const top2   = parseFloat(sorted[1].score ?? 0);
+  const gapPct = top1 !== 0 ? Math.abs(top1 - top2) / Math.abs(top1) * 100 : 100;
+  if (gapPct > W.OBSERVATION_MAX_SCORE_GAP_PCT)
+    return { ok: false, reason: `Rule Engine上位候補のスコア差が大きい(${gapPct.toFixed(1)}%)` };
+
+  const positions       = safeParseJson(pf.positions_json, []);
+  const totalAssets     = parseFloat(pf.total_assets ?? 0);
+  const held            = positions.find(p => (p.name || p.asset_name) === sorted[0].asset_name);
+  const holdingRatioPct = (held && totalAssets > 0) ? parseFloat(held.market_value || 0) / totalAssets * 100 : 0;
+  if (holdingRatioPct >= W.OBSERVATION_MAX_HOLDING_RATIO_PCT)
+    return { ok: false, reason: `${sorted[0].asset_name}の保有比率が上限到達(${holdingRatioPct.toFixed(1)}%)` };
+
+  const amount = Math.round(
+    Math.max(W.OBSERVATION_MIN_AMOUNT, Math.min(W.OBSERVATION_MAX_AMOUNT, cash * 0.05)) / 10000
+  ) * 10000;
+
+  return { ok: true, cashRatio, amount, pf, mkt, candidates };
+}
+
 // agent_recommendationsの資産名（短名/フルネームどちらでも可）とcandidate_assetsの
 // 短名・フルネームを双方向の部分一致で照合する。
 // 例1: "ゴールド（SBI・iシェアーズ・ゴールドファンド）" → 短名"ゴールド"に一致（recがcandを含む）
@@ -141,6 +208,24 @@ async function run(date) {
   else if (normalizedScore >= -1.0) final_signal = 'DEFEND';
   else                               final_signal = 'SELL';
 
+  // ── Step 1.5: WAIT見送り防止（観測ポジション構築への切替判定）─────
+  // 現金比率70%以上・投資可能資金あり・Rule Engine上位候補が僅差・重大リスクなし・
+  // Fear&GreedがExtreme Greedでない、を全て満たす場合のみWAIT→ACCUMULATEへ切り替える。
+  // HARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は現状維持。
+  let observation  = null; // 判定に使ったpf/mkt/candidatesをキャッシュしStep2での再取得を避ける
+  let overrideNote = '';
+  if (final_signal === 'WAIT') {
+    const evalResult = await evaluateObservationOverride(date, votes);
+    if (evalResult.ok) {
+      final_signal  = 'ACCUMULATE';
+      observation   = evalResult;
+      overrideNote  = `現金比率${evalResult.cashRatio.toFixed(1)}%と資金余力があり重大なリスクも検知されなかったため、様子見ではなく小さな観測ポジションを構築しました。`;
+      console.log(`[signalAggregator] WAIT見送り防止: 観測ポジション構築へ切替（現金比率${evalResult.cashRatio.toFixed(1)}%）`);
+    } else {
+      console.log(`[signalAggregator] WAIT維持: ${evalResult.reason}`);
+    }
+  }
+
   // ── Step 2: 銘柄選択（BUY/ACCUMULATE時のみ）────────────────────
   let target_asset  = '';
   let amount        = '';
@@ -156,13 +241,14 @@ async function run(date) {
       const balanceStart = addDays(date, -(CP.LOOKBACK_DECISIONS * 3));
       const balanceEnd    = addDays(date, -1);
 
+      // observationがあれば評価済みのpf/mkt/candidatesを再利用し、Sheets再取得を避ける
       const [candidates, recs, pf, mkt, recentOrders, recentDecisions] = await Promise.all([
-        sheets.getRowsByDate('candidate_assets', date),
+        observation ? Promise.resolve(observation.candidates) : sheets.getRowsByDate('candidate_assets', date),
         sheets.getRowsByDate('agent_recommendations', date)
           .then(r => r.length > 0 ? r : sheets.getRowsByDate('department_recommendations', date))
           .catch(() => []),
-        sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
-        sheets.getLatestRowAsOf('market_data', date).catch(() => null),
+        observation ? Promise.resolve(observation.pf)  : sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
+        observation ? Promise.resolve(observation.mkt) : sheets.getLatestRowAsOf('market_data', date).catch(() => null),
         sheets.getRowsByDateRange('orders', cooldownStart, cooldownEnd).catch(() => []),
         sheets.getRowsByDateRange('final_decisions', balanceStart, balanceEnd).catch(() => []),
       ]);
@@ -335,8 +421,12 @@ async function run(date) {
           }
         }
 
-        // 金額: 勝利銘柄を推薦した部署の平均額（推薦なければ cash×3%）
-        if (winner.matchedAmounts.length > 0) {
+        // 金額: WAIT見送り防止による観測ポジションなら30〜50万円のレンジで固定額。
+        // それ以外は勝利銘柄を推薦した部署の平均額（推薦なければ cash×3%）
+        if (observation) {
+          amount = String(observation.amount);
+          console.log(`[signalAggregator] 金額: 観測ポジション ¥${observation.amount.toLocaleString()}（WAIT見送り防止）`);
+        } else if (winner.matchedAmounts.length > 0) {
           const avg = winner.matchedAmounts.reduce((s, a) => s + a, 0) / winner.matchedAmounts.length;
           amount = String(Math.round(avg / 1000) * 1000);
           console.log(`[signalAggregator] 金額: 推薦平均 ¥${parseInt(amount).toLocaleString()} (${winner.matchedAmounts.map(a=>'¥'+a.toLocaleString()).join('+')})`);
@@ -347,6 +437,10 @@ async function run(date) {
             amount = String(Math.round(cash * 0.03 / 1000) * 1000);
             console.log(`[signalAggregator] 金額: cash×3% ¥${parseInt(amount).toLocaleString()} (部署推薦なし)`);
           }
+        }
+
+        if (observation) {
+          assetReason = `${assetReason} ${overrideNote}`.trim();
         }
       }
     } catch (e) {

@@ -45,4 +45,18 @@ module.exports = {
   // signalAggregatorスコア（規則エンジン推奨第1候補への極小の後押し）。
   // 単独では部署支持率の差を逆転できない値に留める。
   RANK_ORDER_ASSIST: 0.05,
+
+  // ── WAIT見送り防止・観測ポジション構築（2026-08-01〜）─────────────
+  // AI Capitalは「リスクを避けるAI」ではなく「適切なリスクを取りながら長期資産形成を
+  // 行うAI」を目指す。以下を全て満たす場合、final_signalがWAIT判定でも小額の観測
+  // ポジション構築（ACCUMULATE）へ切り替える（lib/signalAggregator.js evaluateObservationOverride）。
+  // ただしHARD RULE（システム異常・監査エラー・portfolio_status異常・データ取得失敗）は対象外。
+  OBSERVATION_MIN_CASH_RATIO_PCT:  70,      // 現金比率がこの%以上のときのみ対象
+  OBSERVATION_MIN_AMOUNT:          300000,  // 観測ポジションの下限額
+  OBSERVATION_MAX_AMOUNT:          500000,  // 観測ポジションの上限額
+  OBSERVATION_MAX_SCORE_GAP_PCT:   15,      // Rule Engine上位候補(rank1)とrank2のスコア差がこの%以内なら「僅差」
+  OBSERVATION_MAX_HOLDING_RATIO_PCT: 40,    // 対象銘柄の保有比率がこれ以上なら見送り（集中抑制。risk.jsの分散基準と同水準）
+  OBSERVATION_MAX_VIX:             30,      // VIXがこれ以上なら高リスク局面としてWAITを維持（risk.jsの高リスク基準と同水準）
+  OBSERVATION_MAX_NASDAQ_DROP_PCT: -3,      // NASDAQ前日比がこれ以下 かつ VIX>=25 なら高リスク局面
+  OBSERVATION_MAX_FEAR_GREED:      75,      // Fear&GreedがこれよりExtreme Greed（>75）ならWAITを維持
 };
