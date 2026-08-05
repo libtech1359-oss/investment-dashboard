@@ -5,3 +5,4 @@ node_modules/
 data/*.jsonl
 data/*.json
 *.pid
+_backup_*/

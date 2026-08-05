@@ -4,3 +4,6 @@ memory.db
 logs/
 data/tasks/
 bot_output.log
+.pid
+__pycache__/
+*.pyc
