@@ -363,15 +363,15 @@ const SEGMENTS = [
   },
   {
     "mod": "outputTemplate",
-    "key": "finalDecisionSection",
-    "dimension": "section",
-    "filterKey": "finalDecisionSection"
-  },
-  {
-    "mod": "outputTemplate",
     "key": "discussionPointsSection",
     "dimension": "section",
     "filterKey": "discussionPointsSection"
+  },
+  {
+    "mod": "outputTemplate",
+    "key": "finalDecisionSection",
+    "dimension": "section",
+    "filterKey": "finalDecisionSection"
   },
   {
     "mod": "outputTemplate",

@@ -19,6 +19,7 @@ const { recordQuality, buildProgressLog } = require('../lib/qualityTracker');
 const { scoreArticle, PUBLISH_SCORE_THRESHOLD } = require('../lib/qualityScorer');
 const { autoFixLayout } = require('../lib/articleAutoFix');
 const { runEditorReview } = require('../lib/editorReview');
+const { getDisplayCandidates } = require('../lib/candidateGroups');
 const development = require('./development');
 
 // 下書きエディタURL（editor.note.com/notes/xxxxx）を公開後の記事URL（note.com/{account}/n/xxxxx）に変換する
@@ -75,16 +76,16 @@ const GAI_ANGLES = [
   '整合性（部署間の主張に矛盾がないか）',
 ];
 
-// 記事の🎯本日の買付候補セクション用の表示分類（2026-07-29追加）。
-// config/categoryBonus.js のCoreボーナス対象とは別軸の「表示用グルーピング」であることに注意。
-// 日経平均はCoreボーナス対象外だが、表示上はCore候補枠に含める（オルカン・S&P500と並べて
-// 最上位1件を提示。管理者確認済み）。宇宙開発はTheme枠が未整備のため候補表示には出さない
-// （Rule Engineの採点・最終判断ロジックには引き続き参加する）。
-const CANDIDATE_DISPLAY_GROUPS = {
-  core:    ['オルカン', 'S&P500', '日経平均'],
-  growth:  ['NASDAQ100', 'FANG+', 'SOX', 'Zテック20'],
-  defense: ['ゴールド'],
-};
+// 秘書室長所見（相沢レイ）②の締めの切り口ローテーション（日付ベースの決定的選定）。
+// 「AI Capitalが今日学んだこと」という同じ骨格が毎日続くのを防ぐため、日替わりで視点を変える。
+const REI_ANGLES = [
+  '今日の議論から見えた課題',
+  '明日以降の改善点',
+  '組織として得た学び',
+  '判断基準の変化（あれば。なければ「変化はなかった」と正直に書く）',
+  '部署間の温度差から見えたこと',
+  '次に検証すべき仮説',
+];
 
 // 10日以上前の画像ファイルを自動削除
 function pruneOldImages() {
@@ -277,8 +278,10 @@ const DEPT_FIRST_NAME = {
 const DEPT_ORDER = ['マーケット分析部', 'リスク管理部', 'ポートフォリオ管理部', '審査部'];
 
 function injectRecommendationSummary(note, recs, decision, pf) {
-  // ⚖️ はバリエーションセレクター(U+FE0F)の有無でLLM出力が変わるため正規表現で検索
-  const sectionRe    = /## ⚖️? 最終判断/;
+  // 「##」の有無・⚖️バリエーションセレクター(U+FE0F)の有無・空白の揺れをすべて許容する。
+  // LLMは初回生成では「## ⚖️ 最終判断」形式で出力するが、品質改善ループの再生成（repair prompt）を
+  // 経ると「##」を省略することがある（2026-07-27の▼HISTORY▼/▼CHART▼検出失敗と同根の問題）。
+  const sectionRe    = /#{0,2}\s*⚖️?\s*最終判断/;
   const sectionMatch = sectionRe.exec(note);
   if (!sectionMatch || !decision) {
     console.log('[injectRecommendationSummary] skip: match=', !!sectionMatch, 'decision=', !!decision);
@@ -443,23 +446,6 @@ function buildWatchPoints(mkt) {
   return `👀 次回の注目点\n\n` + points.map(p => `・${p}`).join('\n');
 }
 
-function buildConclusionBlock(decision, mktData, candidates, votes, articleNum, date) {
-  if (!decision) return null;
-
-  const signal = SIGNAL_JA[decision.final_signal] || decision.final_signal;
-  const asset  = decision.target_asset || 'なし';
-  const amt    = decision.amount && parseInt(decision.amount) > 0
-    ? `¥${parseInt(decision.amount).toLocaleString()}`
-    : '今回なし';
-
-  const reasonLine = decision.reason ? `\n判断理由：${decision.reason}` : '';
-
-  return `🎯 本日の判断
-シグナル：${signal}
-対象銘柄：${asset}
-買付金額：${amt}${reasonLine}`;
-}
-
 // ── コンテキスト構築 ─────────────────────────────────────────
 
 async function buildContext(date, decisions, votes, recs) {
@@ -491,7 +477,8 @@ async function buildContext(date, decisions, votes, recs) {
     `【本日の部署別フォーカス視点（機械選定・必ず中心に据えること）】\n` +
     `神谷シン: ${pickRotation(date, SHIN_ANGLES)}\n` +
     `黒崎ミサキ: ${pickRotation(date, MISAKI_ANGLES)}\n` +
-    `鬼塚ガイ: ${pickRotation(date, GAI_ANGLES)}`
+    `鬼塚ガイ: ${pickRotation(date, GAI_ANGLES)}\n` +
+    `相沢レイ（秘書室長所見②の締めの切り口・機械選定）: ${pickRotation(date, REI_ANGLES)}`
   );
 
   // 各部署の投票
@@ -618,15 +605,10 @@ async function buildContext(date, decisions, votes, recs) {
       const navLabel  = c.nav_ok === 'FALSE' ? ' ※基準価格データ未蓄積' : '';
       return `${c.asset_name}${fullLabel}: ATH乖離${c.ath_gap_pct}% 前日比${c.daily_change_pct}% スコア${c.score}（Rank${c.rank}）${navLabel}${heldStr(c)}`;
     };
-    const topOfGroup = names => {
-      const inGroup = candidates.filter(c => names.includes(c.asset_name));
-      if (inGroup.length === 0) return null;
-      return [...inGroup].sort((a, b) => parseInt(a.rank || 99) - parseInt(b.rank || 99))[0];
-    };
-
-    const coreTop    = topOfGroup(CANDIDATE_DISPLAY_GROUPS.core);
-    const growthTop  = topOfGroup(CANDIDATE_DISPLAY_GROUPS.growth);
-    const defenseTop = topOfGroup(CANDIDATE_DISPLAY_GROUPS.defense);
+    const displayCandidates = getDisplayCandidates(candidates);
+    const coreTop    = displayCandidates.find(c => c.category === 'core')    || null;
+    const growthTop  = displayCandidates.find(c => c.category === 'growth')  || null;
+    const defenseTop = displayCandidates.find(c => c.category === 'defense') || null;
 
     const groupLines = [];
     if (coreTop)    groupLines.push(`🥇 Core候補: ${fmtCandidate(coreTop)}`);
@@ -713,9 +695,9 @@ async function getArticleNumber(date) {
 
 // ── 決定論的後処理（LLM生成直後に必ず適用する機械変換の一式） ──────
 // 再生成ループから複数回呼ばれるため、date確定値の再取得は行わずctxの値を使い回す。
-// ctx: { date, articleNum, recs, decisions, candidates, votes, pf, mkt }
+// ctx: { date, articleNum, recs, decisions, pf, mkt }
 function applyPostProcessing(rawNote, ctx) {
-  const { date, articleNum, recs, decisions, candidates, votes, pf, mkt } = ctx;
+  const { date, articleNum, recs, decisions, pf, mkt } = ctx;
   let note = rawNote;
 
   // 後処理①: 誤字修正
@@ -875,16 +857,6 @@ function applyPostProcessing(rawNote, ctx) {
     ];
   }
   note = injectRecommendationSummary(note, recsForSum, decision, pf);
-
-  // 後処理⑮: 記事冒頭に結論ブロックを挿入（最初の ## 見出し直前）
-  const conclusionBlock = buildConclusionBlock(decision, mkt, candidates, votes, articleNum, date);
-  if (conclusionBlock) {
-    const firstSection = note.search(/^## /m);
-    if (firstSection >= 0) {
-      note = note.slice(0, firstSection) + conclusionBlock + '\n\n' + note.slice(firstSection);
-    }
-    console.log(`[publisher] 結論ブロック挿入: ${decision.final_signal} ${decision.target_asset || ''}`);
-  }
 
   // 後処理⑯: 空行正規化（━━━ は削除済みのため圧縮不要）
   note = note.replace(/\n{3,}/g, '\n\n');
@@ -1099,7 +1071,7 @@ async function publish(date) {
   const noteSystem = buildNoteSystemPrompt({ activeCharacters });
 
   // ── ctx: 生成・後処理・再生成ループ全体で使い回すデータの束 ──────
-  const ctx = { date, articleNum, recs, decisions, candidates, votes, pf, mkt };
+  const ctx = { date, articleNum, recs, decisions, pf, mkt };
 
   // note.com 記事生成（生成 + 決定論的後処理を1セットとして扱う）
   async function generateArticle(userPrompt) {

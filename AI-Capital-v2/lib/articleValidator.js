@@ -1,5 +1,7 @@
 'use strict';
 
+const { getDisplayCandidates } = require('./candidateGroups');
+
 /**
  * articleValidator.js — 公開前記事整合性監査
  *
@@ -156,8 +158,10 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   }
 
   // ── Rule 07: 投資金額 ─────────────────────────────────────────
+  // 「金額：」は⚖️最終判断セクションにシステムが機械挿入するラベル（injectRecommendationSummary）。
+  // 「買付金額：」は旧・記事冒頭の結論ブロック（廃止済み）の名残りだが、互換のため両対応する。
   if (isBuySignal && finalAmount > 0) {
-    const artAmtMatch = note.match(/買付金額[：:]\s*¥([\d,]+)/);
+    const artAmtMatch = note.match(/(?:買付金額|金額)[：:]\s*¥([\d,]+)/);
     if (artAmtMatch) {
       const artAmt = parseInt(artAmtMatch[1].replace(/,/g, ''));
       if (Math.abs(artAmt - finalAmount) > 1000) {
@@ -285,6 +289,9 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   for (const sec of SUMMARY_SECTIONS) {
     sectionBodies[sec.name] = extractSectionBody(note, sec.patterns);
   }
+  // 結論系セクションのみを対象とする文字列（Rule 25 で使用）。各部署の個別セクション
+  // （少数派の反対意見等、Rule27の仕様上意図的に様子見・見送り表現を含みうる）は含まない。
+  const conclusionText = Object.values(sectionBodies).filter(Boolean).join('\n');
 
   if (isBuySignal && finalAsset && finalAsset !== 'なし') {
     const otherAssetNames = (candidates ?? [])
@@ -560,16 +567,19 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   // ── Rule 25: 最終判断との意味的整合性チェック ────────────────
   // 記事内の「様子見・見送り・保留」等の待機的表現と、「採用・買付を決定・観測ポジション構築」等の
   // 実行的表現が、最終判断（BUY/ACCUMULATE/観測ポジション構築 vs WAIT）と矛盾していないかを確認する。
+  // 判定対象は結論系セクション（conclusionText＝今日の見どころ／本日の論点／秘書室長所見）のみに限定する。
+  // note全文を対象にすると、少数派の反対意見（例: 審査部が個別セクションで「様子見支持」と表明する
+  // ことはRule27の仕様上正常）まで矛盾として誤検知してしまうため（Rule12と同種の過検知バグ）。
   const WAIT_EXPRESSIONS   = /(様子見|買付を見送る|見送りとし|一旦保留|投資を控える|待機(?:とし|する|します|とします)|全社的に見送り)/;
   const EXECUTE_EXPRESSIONS = /(採用しました|採用します|買付を決定しました|買付を決定します|観測ポジションを構築します|観測ポジションを構築しました)/;
 
   const isWaitSignal = finalSignal === 'WAIT';
 
   if (isBuySignal) {
-    const waitMatches = note.match(new RegExp(WAIT_EXPRESSIONS, 'g'));
+    const waitMatches = conclusionText.match(new RegExp(WAIT_EXPRESSIONS, 'g'));
     if (waitMatches && waitMatches.length > 0) {
-      const idx = note.search(WAIT_EXPRESSIONS);
-      const ctx = note.slice(Math.max(0, idx - 100), idx + 200);
+      const idx = conclusionText.search(WAIT_EXPRESSIONS);
+      const ctx = conclusionText.slice(Math.max(0, idx - 100), idx + 200);
       warnings.push(warn(25, `最終判断が${finalSignal}（買付実行）にもかかわらず、記事内に様子見・見送りを示す表現が含まれています`,
         ['検出表現', [...new Set(waitMatches)]],
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
@@ -578,10 +588,10 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   }
 
   if (isWaitSignal) {
-    const execMatches = note.match(new RegExp(EXECUTE_EXPRESSIONS, 'g'));
+    const execMatches = conclusionText.match(new RegExp(EXECUTE_EXPRESSIONS, 'g'));
     if (execMatches && execMatches.length > 0) {
-      const idx = note.search(EXECUTE_EXPRESSIONS);
-      const ctx = note.slice(Math.max(0, idx - 100), idx + 200);
+      const idx = conclusionText.search(EXECUTE_EXPRESSIONS);
+      const ctx = conclusionText.slice(Math.max(0, idx - 100), idx + 200);
       warnings.push(warn(25, `最終判断がWAIT（見送り）にもかかわらず、記事内に買付・観測ポジション構築の実行を示す表現が含まれています`,
         ['検出表現', [...new Set(execMatches)]],
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
@@ -697,6 +707,67 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     if (headingLike.length > 0) {
       warnings.push(warn(31, '許可されていない絵文字が見出し形式で使われています',
         ['検出', headingLike.slice(0, 3).map(({ lineNum, text }) => `行 ${lineNum}: ${text.slice(0, 20)}`)],
+      ));
+    }
+  }
+
+  // ── Rule 32: 🎯本日の買付候補 の3カテゴリ欠落チェック ────────────
+  // コンテキストに🥇Core/🚀Growth/🛡Defenseの候補が存在するのに、記事本文に
+  // そのカテゴリの絵文字・銘柄名の両方が現れない場合、LLMが「理由が弱い」等の
+  // 理由で候補行ごと省略している（記事のストーリー性を損なう既知の不具合）。
+  {
+    const candidatesBody = extractSectionBody(note, [/🎯[^\n]*買付候補/, /本日の買付候補/]);
+    if (candidatesBody) {
+      const displayCandidates = getDisplayCandidates(candidates ?? []);
+      const CATEGORY_EMOJI = { core: '🥇', growth: '🚀', defense: '🛡' };
+      const missing = displayCandidates
+        .filter(c => {
+          const emoji = CATEGORY_EMOJI[c.category];
+          return !candidatesBody.includes(emoji) || !candidatesBody.includes(c.asset_name);
+        })
+        .map(c => `${c.label}（${c.asset_name}）`);
+      if (missing.length > 0) {
+        warnings.push(warn(32, '本日の買付候補で🥇Core/🚀Growth/🛡Defenseの一部カテゴリが欠落しています',
+          ['欠落しているカテゴリ',   missing],
+          ['コンテキスト上の候補',   displayCandidates.map(c => `${c.label}: ${c.asset_name}`)],
+        ));
+      }
+    }
+  }
+
+  // ── Rule 33: 審査部の評価と結論の論理整合性 ────────────────────
+  // 「〇〇は過大評価／根拠不足／論理破綻」のように他部署の主張を否定的に評価しながら、
+  // 判断ラベルではその部署の提案をそのまま支持している場合、間に橋渡しの理由（それでも／ただし等）
+  // がなければ論理が繋がっていない（結論へ至る理由の欠落）とみなす。
+  {
+    const gaiBody33 = extractDeptBody(DEPT_HEADERS.gai.pattern);
+    if (gaiBody33) {
+      const NEGATIVE_EVAL_RE = /(神谷|黒崎|アオイ|橘|鬼塚)の[^。\n]{0,20}(過大(?:評価)?|過小(?:評価)?|根拠不足|論理破綻|説得力に欠け|不十分|バイアス)/;
+      const POSITIVE_LABEL_RE = /判断[：:][^\n]{0,10}(支持|推奨)/;
+      // 「ただし」等の逆接だけでなく、「そのため〜という形で」のように懸念を踏まえて
+      // 実行方法（金額縮小・分散・積立化等）を調整した結果としての結論も橋渡しとみなす。
+      const BRIDGE_RE = /(ただし|とはいえ|それでも|一方で|なお|とはいうものの|であっても|とはいうもの|という形で|踏まえ|留意し|意識しつつ|縮小|限定的)/;
+      const negMatch = gaiBody33.match(NEGATIVE_EVAL_RE);
+      if (negMatch && POSITIVE_LABEL_RE.test(gaiBody33) && !BRIDGE_RE.test(gaiBody33)) {
+        warnings.push(warn(33, '審査部が特定部署の主張を否定的に評価しながら、その評価と結論（支持／推奨）の間に理由の橋渡しがありません',
+          ['検出した否定評価', [negMatch[0]]],
+          ['審査部要約',       [gaiBody33.slice(0, 200)]],
+        ));
+      }
+    }
+  }
+
+  // ── Rule 34: 今日の見どころでの結論（対象銘柄名）先出し禁止 ──────
+  // 📌今日の見どころは⚖️最終判断より前に読まれる「論点提示」セクション。
+  // 対立軸のみを書き、最終的に採用された銘柄名は書かない設計（詳細はhighlightsSectionテンプレート参照）。
+  // 実際のLLM出力で「NASDAQ100への資金配分をどこまで進めるか」のように対象銘柄名を
+  // 先出ししてしまうケースが確認されたため、機械チェックで検知する。
+  if (finalAsset && finalAsset !== 'なし') {
+    const highlightsBody = extractSectionBody(note, [/📌[^\n]*今日の見どころ/, /今日の見どころ/]);
+    if (highlightsBody && matchesFinalAsset(highlightsBody)) {
+      warnings.push(warn(34, '今日の見どころに最終判断の対象銘柄名が書かれており、結論を先出ししています',
+        ['最終判断銘柄', [`・${finalAsset}`]],
+        ['見どころ本文', [highlightsBody.slice(0, 150)]],
       ));
     }
   }
