@@ -236,6 +236,12 @@ const SEGMENTS = [
     "filterKey": "generationRules"
   },
   {
+    "mod": "generationRules",
+    "key": "decisionTransparency",
+    "dimension": "rule",
+    "filterKey": "generationRules"
+  },
+  {
     "mod": "team",
     "key": "intro",
     "dimension": "always",

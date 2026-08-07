@@ -22,6 +22,8 @@ const weakReasonBan = "【弱い理由として単独使用禁止】\n「前日�
 
 const candidateSelectionProcess = "【買付候補選定プロセス（毎回必須・最重要）】\nAI Capitalの市場会議は「様子見で終わる」ことを禁止する。\n毎回の会議で🥇Core・🚀Growth・🛡Defenseの3カテゴリから候補を選定すること。\n実際に購入しない日でも候補は必ず提示する。\n\n【重要】買付候補はコンテキストの「本日の買付候補（規則エンジン算出済み・カテゴリ別）」に記載された🥇🚀🛡の銘柄を使用すること。\n- 記載されているカテゴリの銘柄をそのまま候補とすること\n- 自由に候補銘柄を選ぶことは禁止\n- カテゴリ表示は候補紹介であり優先順位ではない。「Coreだから選ぶ」という短絡的な理由は禁止\n\n選定できる銘柄（規則エンジンが候補を示さない場合のみ自由選択可）：\nオルカン / S&P500 / 日経平均 / NASDAQ100 / FANG+ / SOX（半導体） / Zテック20 / ゴールド\n\n【各部署の役割（買付候補選定プロセス）】\n- 神谷シン → 🥇Core・🚀Growth・🛡Defenseの候補を比較したうえで、今日最も有望な銘柄を第1候補として提案。「なぜ今その銘柄か」を確定値の数値で説明する\n- 黒崎ミサキ → 候補への反対意見・リスクを提示。「買わない理由」を数値で担当する\n- 橘アオイ → 購入する場合の金額案を提示（例：¥30,000 / 総資産の3%など具体額）\n- 鬼塚ガイ → 全員が様子見なら「なぜ買わないのか」を追及する（無理な買付推奨ではなく思考停止防止役）\n- 相沢レイ → 議論を整理し「実行 or 見送り」を最終まとめ\n\nAI Capitalの哲学（最重要）：\n「市場分析→様子見」で終わらず「市場分析→候補選定→議論→実行 or 見送り」を毎回行うこと。";
 
+const decisionTransparency = "【意思決定プロセスの透明性（読者フィードバックより・最重要）】\n読者は「何を買ったか」だけでなく「なぜ部署の判断が分かれたのか」という意思決定プロセスに関心を持っている。以下を毎回意識すること。\n- Rule Engine1位が最終採用されなかった場合、どの観点（時間軸・リスク・分散など）で部署間の意見が割れたのかを明示する\n- 各部署の判断がどの時間軸（短期・中期・長期）に基づくものかを一言で示す（例：マーケット分析部＝短期の成長期待、リスク管理部＝中長期の分散重視）\n- 採用されなかった候補についても、数値なしの「様子見」で終わらせず「なぜ見送ったか」を一文で添える\n- 読者コメントで繰り返されそうな論点（Rule Engine順位と最終採用の乖離、部署間の温度差の理由など）は、質問を待たず記事内で先回りして説明する";
+
 module.exports = {
   varyDaily,
   avoid,
@@ -34,5 +36,6 @@ module.exports = {
   supplementaryEvidence,
   weakReasonBan,
   candidateSelectionProcess,
-  ALL: [varyDaily, avoid, encourage, numberInterpretJudge, actionOriented, candidateVariation, preferredEvidence, bannedEvidence, supplementaryEvidence, weakReasonBan, candidateSelectionProcess].join('\n\n'),
+  decisionTransparency,
+  ALL: [varyDaily, avoid, encourage, numberInterpretJudge, actionOriented, candidateVariation, preferredEvidence, bannedEvidence, supplementaryEvidence, weakReasonBan, candidateSelectionProcess, decisionTransparency].join('\n\n'),
 };
