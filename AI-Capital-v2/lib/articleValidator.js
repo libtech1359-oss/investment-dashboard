@@ -278,7 +278,9 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     }
   }
 
-  // ── Rule 11: 結論系セクション（見どころ／論点／秘書室長所見）の銘柄整合性 ──
+  // ── Rule 11: 結論系セクション（論点／最終判断／秘書室長所見）の銘柄整合性 ──
+  // 📌今日の見どころはRule34により最終判断銘柄名を意図的に伏せる設計のため対象外とする
+  // （Rule34と矛盾する誤検知を避けるため、下記RULE11_SECTIONSに分離・2026-08-08修正）。
   // ── Rule 12: 部署合意状況の言及整合性 ─────────────────────────
   const SUMMARY_SECTIONS = [
     { name: '今日の見どころ', patterns: [/📌[^\n]*今日の見どころ/, /今日の見どころ/] },
@@ -289,17 +291,31 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   for (const sec of SUMMARY_SECTIONS) {
     sectionBodies[sec.name] = extractSectionBody(note, sec.patterns);
   }
-  // 結論系セクションのみを対象とする文字列（Rule 25 で使用）。各部署の個別セクション
+  // 結論系セクションのみを対象とする文字列（Rule 25等で使用）。各部署の個別セクション
   // （少数派の反対意見等、Rule27の仕様上意図的に様子見・見送り表現を含みうる）は含まない。
   const conclusionText = Object.values(sectionBodies).filter(Boolean).join('\n');
+
+  // Rule11専用の対象セクション。📌今日の見どころはRule34の仕様上、最終判断銘柄名を
+  // 意図的に伏せて書かれる（結論の先出し禁止）ため対象から外し、実際に最終判断との
+  // 整合性を確認すべきセクションのみを見る。SUMMARY_SECTIONS／conclusionText（Rule12・
+  // Rule25・Rule35・Rule36が参照）とは独立に保ち、他ルールへは影響させない。
+  const RULE11_SECTIONS = [
+    { name: '本日の論点',   patterns: [/🔴[^\n]*本日の論点/, /本日の論点/] },
+    { name: '最終判断',     patterns: [/⚖️[^\n]*最終判断/, /最終判断/] },
+    { name: '秘書室長所見', patterns: [/👑[^\n]*秘書室長/, /秘書室長所見/] },
+  ];
+  const rule11SectionBodies = {};
+  for (const sec of RULE11_SECTIONS) {
+    rule11SectionBodies[sec.name] = extractSectionBody(note, sec.patterns);
+  }
 
   if (isBuySignal && finalAsset && finalAsset !== 'なし') {
     const otherAssetNames = (candidates ?? [])
       .map(c => c.asset_name)
       .filter(name => name && name !== finalAsset);
 
-    for (const sec of SUMMARY_SECTIONS) {
-      const body = sectionBodies[sec.name];
+    for (const sec of RULE11_SECTIONS) {
+      const body = rule11SectionBodies[sec.name];
       if (!body) continue;
       const mentionedOthers = otherAssetNames.filter(name => body.includes(name));
       if (mentionedOthers.length > 0 && !matchesFinalAsset(body)) {
@@ -769,6 +785,55 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
         ['最終判断銘柄', [`・${finalAsset}`]],
         ['見どころ本文', [highlightsBody.slice(0, 150)]],
       ));
+    }
+  }
+
+  // ── Rule 35: Rule Engine上位候補と最終採用銘柄の乖離説明（読者フィードバックより） ──
+  // Rule Engineの総合評価が最も高い候補（rank=1）が実際には採用されなかった場合、
+  // 「なぜRule Engine上位が採用されなかったのか」という視点が読者から寄せられている
+  // （decisionTransparencyルール対応）。結論系セクション＋最終判断本文のいずれにも
+  // 乖離を説明する記述が見当たらない場合、プロンプト指示が反映されていない可能性が
+  // 高いとして警告する（LLM補正ループに乗せるための軽量ヒューリスティック）。
+  {
+    const rankedCandidates = (candidates ?? [])
+      .filter(c => c.asset_name && c.rank !== undefined && c.rank !== null && c.rank !== '')
+      .sort((a, b) => parseInt(a.rank) - parseInt(b.rank));
+    const topCandidate = rankedCandidates[0];
+
+    if (isBuySignal && topCandidate && finalAsset && finalAsset !== 'なし' &&
+        parseInt(topCandidate.rank) === 1 && !matchesFinalAsset(topCandidate.asset_name)) {
+      const finalDecisionBody = extractSectionBody(note, [/⚖️[^\n]*最終判断/, /最終判断/]);
+      const targetText = `${conclusionText}\n${finalDecisionBody}`;
+      const mentionsTopCandidate = targetText.includes(topCandidate.asset_name) ||
+        (topCandidate.full_name && targetText.includes(topCandidate.full_name));
+      const CONTRAST_RE = /(一方|しかし|ものの|とはいえ|それでも|見送|至らな|優先し|上回り|下回り|重視し|判断しました|根拠が不足|採用には至らな)/;
+      if (!mentionsTopCandidate || !CONTRAST_RE.test(targetText)) {
+        warnings.push(warn(35, 'Rule Engineの1位候補が最終採用されていませんが、記事内にその理由の説明が見当たりません',
+          ['Rule Engine1位', [`・${topCandidate.asset_name}（スコア${topCandidate.score ?? '—'}）`]],
+          ['最終判断銘柄',    [`・${finalAsset}`]],
+        ));
+      }
+    }
+  }
+
+  // ── Rule 36: WAIT最終判断の見送り理由の具体性（読者フィードバックより） ────
+  // 「見送りました」「様子見です」のような定型文だけで終わらせず、数値と理由の
+  // 組み合わせで見送り理由を説明することを必須化する。
+  {
+    if (isWaitSignal) {
+      const finalDecisionBody = extractSectionBody(note, [/⚖️[^\n]*最終判断/, /最終判断/]);
+      const reasonText = (finalDecisionBody || conclusionText || '').trim();
+      const trimmed = reasonText.replace(/\s+/g, '');
+      if (trimmed) {
+        const hasNumericEvidence = /\d/.test(reasonText);
+        const hasReasonConnector = /(ため|により|ことから|と判断し|不足して|過熱|集中|警戒|優先し|乏しく|根拠)/.test(reasonText);
+        const tooShort = trimmed.length < 15;
+        if (tooShort || (!hasNumericEvidence && !hasReasonConnector)) {
+          warnings.push(warn(36, '最終判断がWAIT（見送り）ですが、見送り理由に具体的な数値・根拠が示されていません',
+            ['最終判断本文', [reasonText.slice(0, 150) || '（空）']],
+          ));
+        }
+      }
     }
   }
 

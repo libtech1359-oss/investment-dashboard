@@ -29,7 +29,9 @@ function getDisplayCandidates(candidates) {
   return Object.entries(CANDIDATE_DISPLAY_GROUPS)
     .map(([category, { label, names }]) => {
       const top = topOfGroup(candidates, names);
-      return top ? { category, label, ...top } : null;
+      // candidate_assets側の生categoryフィールド（例: 'theme'）に表示用category
+      // （'core'/'growth'/'defense'）が上書きされないよう、展開順を後勝ちにする。
+      return top ? { ...top, category, label } : null;
     })
     .filter(Boolean);
 }

@@ -4,5 +4,6 @@ google-credentials.json
 node_modules/
 data/*.jsonl
 data/*.json
+!data/reader_feedback.jsonl
 *.pid
 _backup_*/

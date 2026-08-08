@@ -10,6 +10,7 @@ const { ask }      = require('../lib/ollama');
 const sheets       = require('../lib/sheets');
 const constitution = require('../lib/constitution');
 const { fgDisplay } = require('../lib/marketUtils');
+const { getDisplayCandidates, isAllowedAssetName } = require('../lib/candidateGroups');
 
 const DEPT       = 'マーケット分析部';
 const AGENT_NAME = '神谷シン';
@@ -24,10 +25,15 @@ const SYSTEM = `
 【入力データ】
 - market_data: date | fear_greed | vix | sp500 | nasdaq100 | sox | gold | usdjpy
   各列の数値: fear_greed(0-100) vix(数値) sp500/nasdaq100/sox/gold(前日比%) usdjpy(円)
-- candidate_assets: nav_pricesから算出した確定基準価格ベースの候補銘柄データ
-  列: nav(最新基準価格) ath_nav(最高値) ath_gap_pct(ATH乖離%) daily_change_pct(前日比%)
-      chg_5d(5日変化%) chg_20d(20日変化%) rebound_rate(20日安値からの反発%) score(総合評価スコア)
-  nav_ok=FALSE の銘柄は nav_prices にデータが未蓄積（スコア=0は中立値）
+- 本日の買付候補: 記事の「🥇Core候補/🚀Growth候補/🛡Defense候補」欄に表示されるのと
+  完全に同じ3銘柄（各カテゴリの最上位1件）のみ。ath_gap_pct(ATH乖離%) daily_change_pct(前日比%)
+  chg_5d(5日変化%) chg_20d(20日変化%) rebound_rate(20日安値からの反発%) score(総合評価スコア)
+
+【候補銘柄の選択ルール（最重要・厳守）】
+あなたが提案できる銘柄は、コンテキストに提示された「本日の買付候補」3件（Core/Growth/Defenseそれぞれの代表1件）に限る。
+まずCore候補・Growth候補・Defense候補の3つを比較すること。その上で「今日はGrowth候補を推します」のように、
+必ずこの3件のいずれか1件を選ぶこと。コンテキストに存在しない銘柄（例：候補表示に出ていない個別テーマ銘柄）を
+新たに提案することは絶対禁止。3件のいずれも推奨できない場合はWAITとし、asset_nameは「なし」にすること。
 
 【分析基準（厳守）】
 VIX: <15=SAFE <20=SAFE/CAUTION <30=CAUTION >30=DANGER
@@ -85,11 +91,13 @@ function formatCandidate(c) {
   return `・Rank${c.rank} ${c.asset_name}${fullLabel}: ATH乖離${c.ath_gap_pct}% 前日比${c.daily_change_pct}%${extStr} スコア${c.score}${navLabel}`;
 }
 
-async function buildContext(date) {
-  const [mkt, candidates] = await Promise.all([
-    sheets.getLatestRow('market_data'),
-    sheets.getRowsByDate('candidate_assets', date).catch(() => []),
-  ]);
+async function getTodayDisplayCandidates(date) {
+  const candidatesRaw = await sheets.getRowsByDate('candidate_assets', date).catch(() => []);
+  return getDisplayCandidates(candidatesRaw);
+}
+
+async function buildContext(date, displayCandidates) {
+  const mkt = await sheets.getLatestRow('market_data');
 
   const lines = [];
 
@@ -107,14 +115,13 @@ async function buildContext(date) {
     lines.push('【市場データ】未取得');
   }
 
-  if (candidates.length > 0) {
+  if (displayCandidates.length > 0) {
     lines.push('');
-    lines.push('【買付候補銘柄（総合評価スコア順）】');
-    candidates.sort((a, b) => parseInt(a.rank || 99) - parseInt(b.rank || 99));
-    candidates.forEach(c => lines.push(formatCandidate(c)));
+    lines.push('【本日の買付候補（この3件の中からのみ選ぶこと。ここに無い銘柄の提案は禁止）】');
+    displayCandidates.forEach(c => lines.push(`${c.label}: ${formatCandidate(c)}`));
   } else {
     lines.push('');
-    lines.push('【買付候補銘柄】データ未取得（asset_masterを確認すること）');
+    lines.push('【本日の買付候補】データ未取得（asset_masterを確認すること）');
   }
 
   return lines.join('\n');
@@ -122,62 +129,100 @@ async function buildContext(date) {
 
 async function analyze(date) {
   console.log(`[${DEPT}] 分析開始 ${date}`);
-  const context = await buildContext(date);
-  const system  = constitution.prefix() + SYSTEM;
 
-  const raw    = await ask(system, context, { num_predict: 1200 });
-  const parsed = parseJson(raw);
+  try {
+    const displayCandidates = await getTodayDisplayCandidates(date);
+    const context = await buildContext(date, displayCandidates);
+    const system  = constitution.prefix() + SYSTEM;
 
-  const signal     = parsed.signal ?? 'WAIT';
-  const confidence = parsed.confidence ?? 50;
-  const comment    = (parsed.comment ?? '').slice(0, 200);
+    const raw    = await ask(system, context, { num_predict: 1200 });
+    const parsed = parseJson(raw);
 
-  // rec を先に確定（agent_votes と department_recommendations 両方で使用）
-  const rec       = parsed.recommendation ?? {};
-  const recAction = rec.action || (signal === 'WAIT' || signal === 'DEFEND' ? signal : 'ACCUMULATE');
-  const noAsset   = !rec.asset_name || rec.asset_name === 'なし' || rec.asset_name === '';
-  const noAction  = recAction === 'WAIT' || recAction === 'DEFEND';
-  const recAmt    = (noAsset || noAction) ? 0 : (rec.recommended_amount ?? 0);
-  const recReason = (rec.reason ?? comment).slice(0, 100);
+    let signal        = parsed.signal ?? 'WAIT';
+    const confidence   = parsed.confidence ?? 50;
+    const comment      = (parsed.comment ?? '').slice(0, 200);
 
+    // rec を先に確定（agent_votes と department_recommendations 両方で使用）
+    let rec = parsed.recommendation ?? {};
+    // 安全弁: LLMが「本日の買付候補」3件の外の銘柄を返した場合、記事の候補表示と
+    // 部署議論が食い違わないよう安全側WAITに丸める（プロンプト指示だけに依存しない）
+    if (!isAllowedAssetName(displayCandidates, rec.asset_name)) {
+      console.warn(`[${DEPT}] 候補外銘柄「${rec.asset_name}」が返されたため安全側でWAITに補正`);
+      rec = { asset_id: '', asset_name: 'なし', action: 'WAIT', recommended_amount: 0, reason: '候補外銘柄のため見送り' };
+      if (signal !== 'DEFEND') signal = 'WAIT';
+    }
+    const recAction = rec.action || (signal === 'WAIT' || signal === 'DEFEND' ? signal : 'ACCUMULATE');
+    const noAsset   = !rec.asset_name || rec.asset_name === 'なし' || rec.asset_name === '';
+    const noAction  = recAction === 'WAIT' || recAction === 'DEFEND';
+    const recAmt    = (noAsset || noAction) ? 0 : (rec.recommended_amount ?? 0);
+    const recReason = (rec.reason ?? comment).slice(0, 100);
+
+    await sheets.upsertRow('agent_votes', ['date', 'department'], {
+      date,
+      department:            DEPT,
+      signal,
+      confidence:            String(confidence),
+      comment,
+      recommendation_asset:  rec.asset_name ?? '',
+      recommendation_amount: String(recAmt),
+    });
+
+    await Promise.all([
+      sheets.upsertRow('department_recommendations', ['date', 'department'], {
+        date,
+        department:         DEPT,
+        asset_id:           rec.asset_id  ?? '',
+        asset_name:         rec.asset_name ?? 'なし',
+        action:             recAction,
+        recommended_amount: String(recAmt),
+        confidence:         String(confidence),
+        reason:             recReason,
+      }),
+      sheets.upsertRow('agent_recommendations', ['date', 'department'], {
+        date,
+        task_id:             date,
+        agent_name:          AGENT_NAME,
+        department:          DEPT,
+        recommendation_type: recAction,
+        asset_id:            rec.asset_id  ?? '',
+        asset_name:          rec.asset_name ?? 'なし',
+        amount:              String(recAmt),
+        confidence:          String(confidence),
+        reason_summary:      recReason,
+      }),
+    ]);
+
+    console.log(`[${DEPT}] 投票完了: ${signal}(${confidence}%) — ${comment}`);
+    console.log(`[${DEPT}] 提案: ${recAction} ${rec.asset_name || 'なし'} ¥${recAmt.toLocaleString()}`);
+    return { signal, confidence, comment, recommendation: rec };
+  } catch (err) {
+    // LLM/Sheets の一時的な失敗（タイムアウト・abort等）で部署が記事から丸ごと
+    // 欠落しないよう、安全側WAITで全シートへフォールバック記録する。
+    const comment = `⚠️ ${err.message}。安全側でWAIT（分析スキップ）`;
+    console.error(`[${DEPT}] ${comment}`);
+    await writeFallbackVote(date, comment).catch(e =>
+      console.error(`[${DEPT}] フォールバック記録も失敗: ${e.message}`)
+    );
+    return { signal: 'WAIT', confidence: 0, comment };
+  }
+}
+
+async function writeFallbackVote(date, comment) {
   await sheets.upsertRow('agent_votes', ['date', 'department'], {
-    date,
-    department:            DEPT,
-    signal,
-    confidence:            String(confidence),
-    comment,
-    recommendation_asset:  rec.asset_name ?? '',
-    recommendation_amount: String(recAmt),
+    date, department: DEPT, signal: 'WAIT', confidence: '0', comment: comment.slice(0, 200),
+    recommendation_asset: '', recommendation_amount: '0',
   });
-
   await Promise.all([
     sheets.upsertRow('department_recommendations', ['date', 'department'], {
-      date,
-      department:         DEPT,
-      asset_id:           rec.asset_id  ?? '',
-      asset_name:         rec.asset_name ?? 'なし',
-      action:             recAction,
-      recommended_amount: String(recAmt),
-      confidence:         String(confidence),
-      reason:             recReason,
+      date, department: DEPT, asset_id: '', asset_name: 'なし', action: 'WAIT',
+      recommended_amount: '0', confidence: '0', reason: comment.slice(0, 100),
     }),
     sheets.upsertRow('agent_recommendations', ['date', 'department'], {
-      date,
-      task_id:             date,
-      agent_name:          AGENT_NAME,
-      department:          DEPT,
-      recommendation_type: recAction,
-      asset_id:            rec.asset_id  ?? '',
-      asset_name:          rec.asset_name ?? 'なし',
-      amount:              String(recAmt),
-      confidence:          String(confidence),
-      reason_summary:      recReason,
+      date, task_id: date, agent_name: AGENT_NAME, department: DEPT,
+      recommendation_type: 'WAIT', asset_id: '', asset_name: 'なし', amount: '0',
+      confidence: '0', reason_summary: comment.slice(0, 100),
     }),
   ]);
-
-  console.log(`[${DEPT}] 投票完了: ${signal}(${confidence}%) — ${comment}`);
-  console.log(`[${DEPT}] 提案: ${recAction} ${rec.asset_name || 'なし'} ¥${recAmt.toLocaleString()}`);
-  return { signal, confidence, comment, recommendation: rec };
 }
 
 module.exports = { analyze };
