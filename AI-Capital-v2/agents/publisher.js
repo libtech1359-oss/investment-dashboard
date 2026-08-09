@@ -20,6 +20,7 @@ const { scoreArticle, PUBLISH_SCORE_THRESHOLD } = require('../lib/qualityScorer'
 const { autoFixLayout } = require('../lib/articleAutoFix');
 const { runEditorReview } = require('../lib/editorReview');
 const { getDisplayCandidates } = require('../lib/candidateGroups');
+const { appendFailLog } = require('../lib/failArticleLog');
 const development = require('./development');
 
 // 下書きエディタURL（editor.note.com/notes/xxxxx）を公開後の記事URL（note.com/{account}/n/xxxxx）に変換する
@@ -1130,6 +1131,16 @@ async function publish(date) {
     try {
       note = await generateArticle(editorRescuePrompt);
       regenerationCount++;
+      // 救済再生成でRule9/26/27/28/30/31相当の純粋なレイアウト崩れ（見出し直後の空行欠落・
+      // 許可されていない絵文字等）が再発することがあるため、Validator再実行の前に必ず一度
+      // 機械修正を通す（Phase2.7調査：ここでautoFixLayoutを呼んでいなかったため、本来
+      // 機械的に直せるはずのレイアウト崩れだけで公開停止になるケースがあった）。
+      const rescueFix = autoFixLayout(note);
+      if (rescueFix.changed) {
+        note = rescueFix.note;
+        mechanicalFixCount++;
+        console.log(`[publisher] 機械修正 ${mechanicalFixCount}回目（最終救済後）: ${rescueFix.fixesApplied.join(', ')}`);
+      }
       validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
       console.log(`[publisher] AI編集長による最終修正完了: ${validation.ok ? 'PASS' : `NG（残り警告${validation.warnings.length}件）`}`);
     } catch (err) {
@@ -1219,6 +1230,15 @@ async function publish(date) {
       });
 
       console.log(buildProgressLog(qualityResult.overall, qualityResult.record_type, qualityResult.consecutive_pass, qualityResult.score));
+      appendFailLog({
+        date, articleId: articleNum,
+        finalSignal: decisions?.[0]?.final_signal, finalAsset: decisions?.[0]?.target_asset,
+        failStage: 'editor_rejected',
+        ruleNums: validation.warnings.map(w => (w.match(/Rule (\d+)/) || [])[1]).filter(Boolean),
+        warnings: validation.warnings,
+        mechanicalFixCount, regenerationCount, editorReview,
+        note,
+      });
       const fallbackDraftUrl = await saveFallbackDraft('AI編集長が公開を見送り');
       return {
         note, x: '', date, noteUrl: null,
@@ -1240,6 +1260,15 @@ async function publish(date) {
       return { overall: 'FAIL', record_type: 'AUTO_RETRY', consecutive_pass: 0, score: preEditorScore };
     });
     console.log(buildProgressLog(qualityResult.overall, qualityResult.record_type, qualityResult.consecutive_pass, qualityResult.score));
+    appendFailLog({
+      date, articleId: articleNum,
+      finalSignal: decisions?.[0]?.final_signal, finalAsset: decisions?.[0]?.target_asset,
+      failStage: 'quality_score_below_threshold',
+      ruleNums: validation.warnings.map(w => (w.match(/Rule (\d+)/) || [])[1]).filter(Boolean),
+      warnings: validation.warnings,
+      mechanicalFixCount, regenerationCount, editorReview: null,
+      note,
+    });
     const fallbackDraftUrl = await saveFallbackDraft('Quality Scoreが公開基準未満');
     return {
       note, x: '', date, noteUrl: null,
@@ -1283,6 +1312,15 @@ async function publish(date) {
       lines.push('', SEP, '', 'ARTICLE NOT PUBLISHED（品質改善ループ上限到達・人間の確認が必要）', '');
       console.error(lines.join('\n'));
       console.log(buildProgressLog(qualityResult.overall, qualityResult.record_type, qualityResult.consecutive_pass, qualityResult.score));
+      appendFailLog({
+        date, articleId: articleNum,
+        finalSignal: decisions?.[0]?.final_signal, finalAsset: decisions?.[0]?.target_asset,
+        failStage: 'validator_loop_exhausted',
+        ruleNums: validation.warnings.map(w => (w.match(/Rule (\d+)/) || [])[1]).filter(Boolean),
+        warnings: validation.warnings,
+        mechanicalFixCount, regenerationCount, editorReview: null,
+        note,
+      });
       const fallbackDraftUrl = await saveFallbackDraft('品質改善ループ上限到達');
       return { note, x: '', date, noteUrl: null, validationFailed: true, validationWarnings: validation.warnings, qualityScore: qualityResult.score, fallbackDraftUrl };
     }

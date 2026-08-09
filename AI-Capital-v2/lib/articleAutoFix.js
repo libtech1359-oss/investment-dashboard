@@ -52,19 +52,39 @@ function fixLabelReflow(note) {
   return { note: note.replace(re, '$1\n$3$4'), changed: true };
 }
 
-// ── Rule 28: 意味の重複（同一文の行を後勝ちで除去） ─────────────
+// ── Rule 28: 意味の重複（文単位で後勝ちの重複文だけを除去） ─────
+// articleValidator.js の Rule 28 は行全体ではなく「行を文（。区切り）に分割した単位」で
+// 重複を検出する（noteLines.flatMap(l => l.split(/(?<=。)/))）。旧実装は行全体が完全一致
+// する場合しか除去できず、他の文と同じ行に同居する重複文（例:「文A。文B。」の文Aだけが
+// 重複）を検出はできるが機械修正できていなかった（2026-08-09 Phase2.10で判明）。
+// 本関数はRule 28と全く同じ境界・同じ「trim後の完全一致・20文字以上・句点で終わる」条件で
+// 判定するため、Rule 28が警告を出す場合は必ず解消でき、Rule 28が警告しない微妙な表記ゆれ
+// （句読点違い・空白違いなど完全一致しないもの）は誤って削除しない。
 function fixDuplicateSentenceLines(note) {
   const lines = note.split('\n');
   const seen  = new Set();
   let changed = false;
   const out = [];
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.length >= 20 && /。$/.test(trimmed)) {
-      if (seen.has(trimmed)) { changed = true; continue; }
-      seen.add(trimmed);
+    // Rule 28 と同じ境界（文末の「。」の直後）で行内の文を分割する。
+    const parts = line.split(/(?<=。)/);
+    let lineChanged = false;
+    const kept = parts.filter(part => {
+      const trimmed = part.trim();
+      if (trimmed.length >= 20 && /。$/.test(trimmed)) {
+        if (seen.has(trimmed)) { changed = true; lineChanged = true; return false; }
+        seen.add(trimmed);
+      }
+      return true;
+    });
+    if (!lineChanged) {
+      out.push(line);
+      continue;
     }
-    out.push(line);
+    const rebuilt = kept.join('');
+    // 行の中身が重複文だけだった場合は行ごと削除（従来の挙動を踏襲）。
+    // 重複文以外の内容（他の文・前後の文言）が残る場合はその内容だけを残す。
+    if (rebuilt.trim() !== '') out.push(rebuilt);
   }
   return { note: out.join('\n'), changed };
 }

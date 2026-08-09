@@ -278,9 +278,24 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     }
   }
 
-  // ── Rule 11: 結論系セクション（論点／最終判断／秘書室長所見）の銘柄整合性 ──
-  // 📌今日の見どころはRule34により最終判断銘柄名を意図的に伏せる設計のため対象外とする
-  // （Rule34と矛盾する誤検知を避けるため、下記RULE11_SECTIONSに分離・2026-08-08修正）。
+  // ── Rule 11: 最終判断と結論系セクションの論理整合性（2026-08-09再設計） ──
+  // 旧設計は「🔴本日の論点／👑秘書室長所見に最終銘柄名の文字列が無い」ことを
+  // そのままFAILにしていたが、Phase2.5の実データ検証で2/2件が「記事全体としては
+  // 矛盾していないが、その段落だけを見ると銘柄名の文字列が無い」という誤検知だった
+  // （文字列不一致であって論理矛盾ではない）。
+  // 新設計ではA（存在確認）とB（論理整合性）を分離する：
+  //   A: 最終判断資産は⚖️最終判断の自動挿入ブロック（対象：〇〇）で必ず記事内に
+  //      現れるため、「特定セクションに書かれているか」は判定材料にしない。
+  //      記事全文のどこにも無い（自動挿入ブロック欠落等の異常時のみ）を保険的に検知する。
+  //   B: 結論系セクション（🔴論点／⚖️最終判断のLLM補足文／👑秘書室長所見）が、
+  //      実際の最終判断と食い違う「明示的な主張」をしていないかを検出する：
+  //      B-1) 他の候補が「採用された／選ばれた」と明言している（実際の最終判断と別銘柄）
+  //      B-2) 「安定性・守り・分散を最優先」等の守り重視の主張をしているのに、
+  //           実際に採用された銘柄がGrowthカテゴリ（攻めの資産）である
+  //      B-3) 「成長性・攻めを最優先」等の攻め重視の主張をしているのに、
+  //           実際に採用された銘柄がDefenseカテゴリ（守りの資産）である
+  //      Coreカテゴリ（オルカン等の分散型インデックス）は攻め/守りいずれの文脈にも
+  //      入りうるため、B-2/B-3の対象から除外し誤検知を避ける。
   // ── Rule 12: 部署合意状況の言及整合性 ─────────────────────────
   const SUMMARY_SECTIONS = [
     { name: '今日の見どころ', patterns: [/📌[^\n]*今日の見どころ/, /今日の見どころ/] },
@@ -295,10 +310,9 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   // （少数派の反対意見等、Rule27の仕様上意図的に様子見・見送り表現を含みうる）は含まない。
   const conclusionText = Object.values(sectionBodies).filter(Boolean).join('\n');
 
-  // Rule11専用の対象セクション。📌今日の見どころはRule34の仕様上、最終判断銘柄名を
-  // 意図的に伏せて書かれる（結論の先出し禁止）ため対象から外し、実際に最終判断との
-  // 整合性を確認すべきセクションのみを見る。SUMMARY_SECTIONS／conclusionText（Rule12・
-  // Rule25・Rule35・Rule36が参照）とは独立に保ち、他ルールへは影響させない。
+  // Rule11専用の対象セクション（Rule35/36が使うfinalDecisionBodyと同じ抽出だが、
+  // SUMMARY_SECTIONS／conclusionText（Rule12・Rule25・Rule35・Rule36が参照）とは
+  // 独立変数に保ち、他ルールの挙動には影響させない）。
   const RULE11_SECTIONS = [
     { name: '本日の論点',   patterns: [/🔴[^\n]*本日の論点/, /本日の論点/] },
     { name: '最終判断',     patterns: [/⚖️[^\n]*最終判断/, /最終判断/] },
@@ -308,21 +322,55 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   for (const sec of RULE11_SECTIONS) {
     rule11SectionBodies[sec.name] = extractSectionBody(note, sec.patterns);
   }
+  const rule11CombinedText = Object.values(rule11SectionBodies).filter(Boolean).join('\n');
 
   if (isBuySignal && finalAsset && finalAsset !== 'なし') {
+    // A: 存在確認（保険）。⚖️最終判断の自動挿入ブロックで必ず現れるはずのため、
+    // 記事全文のどこにも無い場合のみ警告する（自動挿入の欠落等の異常検知）。
+    if (!matchesFinalAsset(note)) {
+      warnings.push(warn(11, '最終判断銘柄が記事本文のどこにも記載されていません',
+        ['最終判断銘柄', [`・${finalAsset}`]],
+      ));
+    }
+
     const otherAssetNames = (candidates ?? [])
       .map(c => c.asset_name)
       .filter(name => name && name !== finalAsset);
 
-    for (const sec of RULE11_SECTIONS) {
-      const body = rule11SectionBodies[sec.name];
-      if (!body) continue;
-      const mentionedOthers = otherAssetNames.filter(name => body.includes(name));
-      if (mentionedOthers.length > 0 && !matchesFinalAsset(body)) {
-        warnings.push(warn(11, `${sec.name}が最終判断銘柄と矛盾している可能性があります`,
-          ['最終判断銘柄',   [`・${finalAsset}`]],
-          ['検出した他銘柄', mentionedOthers],
-          [`${sec.name}本文`, [body.slice(0, 120)]],
+    // B-1: 他の候補が「採用/選択/決定/選定」されたと明言している（実際と異なる銘柄）
+    for (const otherName of otherAssetNames) {
+      const wrongDecisionRe = new RegExp(`${escapeRegExp(otherName)}[^\\n。]{0,10}を(採用|選択|決定|選定)`);
+      const m = rule11CombinedText.match(wrongDecisionRe);
+      if (m) {
+        warnings.push(warn(11, `結論系セクションが実際と異なる銘柄（${otherName}）を採用したと記載しています`,
+          ['最終判断銘柄', [`・${finalAsset}`]],
+          ['検出した記述', [m[0]]],
+        ));
+      }
+    }
+
+    // B-2 / B-3: 守り/攻めの主張と、実際に採用された銘柄のカテゴリの矛盾
+    const displayCandidates  = getDisplayCandidates(candidates ?? []);
+    const finalDisplayEntry  = displayCandidates.find(c => c.asset_name === finalAsset);
+    const finalCategory      = finalDisplayEntry?.category ?? null; // 'core' | 'growth' | 'defense'（Coreは判定対象外）
+
+    const STABILITY_CLAIM_RE = /(安定性|守り|防御|リスク回避|分散)を(最優先|優先|重視)/;
+    const GROWTH_CLAIM_RE    = /(成長性|攻め|モメンタム|積極性)を(最優先|優先|重視)/;
+
+    if (finalCategory === 'growth') {
+      const m = rule11CombinedText.match(STABILITY_CLAIM_RE);
+      if (m) {
+        warnings.push(warn(11, `結論系セクションが守り重視の判断だったと記載していますが、実際の採用銘柄は成長（Growth）カテゴリです`,
+          ['最終判断銘柄', [`・${finalAsset}（Growthカテゴリ）`]],
+          ['検出した記述', [m[0]]],
+        ));
+      }
+    } else if (finalCategory === 'defense') {
+      const m = rule11CombinedText.match(GROWTH_CLAIM_RE);
+      if (m) {
+        warnings.push(warn(11, `結論系セクションが攻め重視の判断だったと記載していますが、実際の採用銘柄は防御（Defense）カテゴリです`,
+          ['最終判断銘柄', [`・${finalAsset}（Defenseカテゴリ）`]],
+          ['検出した記述', [m[0]]],
         ));
       }
     }
@@ -641,17 +689,12 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
 
   // ── Rule 28: 意味の重複（同一文の重複出現） ────────────────────
   {
-    const sentences = noteLines
-      .flatMap(l => l.split(/(?<=。)/))
-      .map(s => s.trim())
-      .filter(s => s.length >= 20);
-    const counts = new Map();
-    for (const s of sentences) counts.set(s, (counts.get(s) ?? 0) + 1);
-    const dup = [...counts.entries()].find(([, c]) => c >= 2);
-    if (dup) {
+    const dups = findDuplicateSentences(noteLines);
+    if (dups.length > 0) {
+      const [text, count] = dups[0];
       warnings.push(warn(28, '同一の文が記事内に重複して出現しています',
-        ['重複文', [dup[0].slice(0, 80)]],
-        ['出現回数', [`${dup[1]}回`]],
+        ['重複文', [text.slice(0, 80)]],
+        ['出現回数', [`${count}回`]],
       ));
     }
   }
@@ -760,11 +803,18 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     if (gaiBody33) {
       const NEGATIVE_EVAL_RE = /(神谷|黒崎|アオイ|橘|鬼塚)の[^。\n]{0,20}(過大(?:評価)?|過小(?:評価)?|根拠不足|論理破綻|説得力に欠け|不十分|バイアス)/;
       const POSITIVE_LABEL_RE = /判断[：:][^\n]{0,10}(支持|推奨)/;
+      // 「様子見支持」「慎重姿勢を支持」等は買付・積極提案への“積極支持”ではなく待機・慎重側の
+      // 結論であり、否定評価と矛盾しない（Phase2.8修正：POSITIVE_LABEL_REが「支持」の文字列
+      // だけで積極支持と誤認していたため分離）。判断ラベル周辺にこれらの語があれば対象外とする。
+      const CAUTIOUS_LABEL_RE = /判断[：:][^\n]{0,10}(様子見|慎重姿勢|静観|待機|見送り)/;
       // 「ただし」等の逆接だけでなく、「そのため〜という形で」のように懸念を踏まえて
       // 実行方法（金額縮小・分散・積立化等）を調整した結果としての結論も橋渡しとみなす。
-      const BRIDGE_RE = /(ただし|とはいえ|それでも|一方で|なお|とはいうものの|であっても|とはいうもの|という形で|踏まえ|留意し|意識しつつ|縮小|限定的)/;
+      // 「しかし」も同種の自然な逆接表現だが従来抜けていたため2026-08-09追加（Phase2.9で
+      // 「神谷の主張は根拠不足。しかし、短期的な上昇余地はある。よって支持する」のような
+      // 正当な橋渡し文をRule33が誤検知していたことが判明したため）。
+      const BRIDGE_RE = /(ただし|とはいえ|それでも|一方で|なお|とはいうものの|であっても|とはいうもの|という形で|踏まえ|留意し|意識しつつ|縮小|限定的|しかし)/;
       const negMatch = gaiBody33.match(NEGATIVE_EVAL_RE);
-      if (negMatch && POSITIVE_LABEL_RE.test(gaiBody33) && !BRIDGE_RE.test(gaiBody33)) {
+      if (negMatch && POSITIVE_LABEL_RE.test(gaiBody33) && !CAUTIOUS_LABEL_RE.test(gaiBody33) && !BRIDGE_RE.test(gaiBody33)) {
         warnings.push(warn(33, '審査部が特定部署の主張を否定的に評価しながら、その評価と結論（支持／推奨）の間に理由の橋渡しがありません',
           ['検出した否定評価', [negMatch[0]]],
           ['審査部要約',       [gaiBody33.slice(0, 200)]],
@@ -859,6 +909,25 @@ function extractSectionBody(note, headerPatterns) {
 }
 
 /**
+ * Rule 28 が使う重複文検出（行を「。」直後で文単位に分割し、trim後20文字以上・完全一致の
+ * ものを重複としてカウントする）。診断ログ（lib/failArticleLog.js）からも同じロジックを
+ * 再利用できるよう module.exports 経由で公開する（2026-08-09 Phase2.11・Rule28の判定
+ * ロジック自体は変更していない、既存のインライン実装を関数として切り出しただけ）。
+ *
+ * @param {string[]} noteLines
+ * @returns {[string, number][]} 重複していた文とその出現回数のペア配列（出現順）
+ */
+function findDuplicateSentences(noteLines) {
+  const sentences = noteLines
+    .flatMap(l => l.split(/(?<=。)/))
+    .map(s => s.trim())
+    .filter(s => s.length >= 20);
+  const counts = new Map();
+  for (const s of sentences) counts.set(s, (counts.get(s) ?? 0) + 1);
+  return [...counts.entries()].filter(([, c]) => c >= 2);
+}
+
+/**
  * 監査警告メッセージを整形する。
  *
  * @param {number}   ruleNum - ルール番号（1〜10）
@@ -884,4 +953,8 @@ function safeParseJson(str, fallback) {
   catch { return fallback; }
 }
 
-module.exports = { validateArticle };
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+module.exports = { validateArticle, extractSectionBody, findDuplicateSentences };
