@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Capital Investment Command Center</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- 個人専用・非公開ページ。config.js に実APIキーを保存（.gitignore対象）。 -->
+<div class="terminal" id="terminal">
+
+  <div class="section header-section">
+    <div class="header-row">
+      <div class="brand">AI CAPITAL</div>
+      <div class="status" id="status-indicator">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">CONNECTING</span>
+      </div>
+    </div>
+    <div class="subtitle">Investment Command Center</div>
+  </div>
+
+  <div class="section dual-col">
+    <div class="col">
+      <div class="section-title">FEAR &amp; GREED</div>
+      <div class="fg-bar-track"><div class="fg-bar-fill" id="fg-bar-fill"></div></div>
+      <div class="fg-row">
+        <span class="fg-value" id="fg-value">--</span>
+        <span class="fg-zone" id="fg-zone">-</span>
+      </div>
+    </div>
+    <div class="col">
+      <div class="section-title">MARKET</div>
+      <div class="mkt-list" id="mkt-list">
+        <div class="mkt-row"><span>VIX</span><span id="mkt-vix">--</span></div>
+        <div class="mkt-row"><span>S&amp;P500</span><span id="mkt-sp500">--</span></div>
+        <div class="mkt-row"><span>NASDAQ100</span><span id="mkt-nasdaq100">--</span></div>
+        <div class="mkt-row"><span>SOX</span><span id="mkt-sox">--</span></div>
+        <div class="mkt-row"><span>USD/JPY</span><span id="mkt-usdjpy">--</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">PORTFOLIO</div>
+    <div class="portfolio-grid" id="portfolio-grid">
+      <div class="pf-cell">
+        <div class="pf-label">総資産</div>
+        <div class="pf-value" id="pf-total">--</div>
+      </div>
+      <div class="pf-cell">
+        <div class="pf-label">現金</div>
+        <div class="pf-value" id="pf-cash">--</div>
+      </div>
+      <div class="pf-cell">
+        <div class="pf-label">投資中</div>
+        <div class="pf-value" id="pf-invested">--</div>
+      </div>
+      <div class="pf-cell">
+        <div class="pf-label">含み損益</div>
+        <div class="pf-value" id="pf-pl">--</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section decision-section">
+    <div class="section-title center">FINAL DECISION</div>
+    <div class="decision-main">
+      <span class="decision-dot" id="decision-dot"></span>
+      <span class="decision-label" id="decision-label">--</span>
+    </div>
+    <div class="decision-sub" id="decision-sub">-</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">DEPARTMENT MEETING</div>
+    <div class="dept-grid" id="dept-grid">
+      <!-- app.js が動的に生成 -->
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">HOLDINGS</div>
+    <div class="holdings-table" id="holdings-table">
+      <div class="holdings-header">
+        <span>Asset</span><span>NAV</span><span>ATH Gap</span><span>Daily</span>
+      </div>
+      <div id="holdings-rows"><div class="dim-row">loading...</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">CANDIDATES</div>
+    <div class="candidates-list" id="candidates-list">
+      <div class="dim-row">loading...</div>
+    </div>
+  </div>
+
+  <div class="section more-toggle-section">
+    <button class="more-toggle" id="more-toggle" type="button">
+      <span id="more-toggle-icon">&#9660;</span>
+      <span id="more-toggle-text">ORDERS / HISTORY</span>
+    </button>
+  </div>
+
+  <div class="section more-section" id="more-section" hidden>
+    <div class="section-title">RECENT ORDERS</div>
+    <div class="orders-list" id="orders-list">
+      <div class="dim-row">未取得（開くと取得）</div>
+    </div>
+
+    <div class="section-title" style="margin-top:16px">ASSET HISTORY</div>
+    <div class="chart-wrap">
+      <canvas id="history-chart" height="120"></canvas>
+    </div>
+  </div>
+
+  <div class="section footer-section">
+    <span class="footer-note">最終更新: <span id="last-updated">--</span></span>
+    <button class="refresh-btn" id="refresh-btn" type="button">REFRESH</button>
+  </div>
+
+</div>
+
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

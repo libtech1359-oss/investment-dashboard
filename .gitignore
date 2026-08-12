@@ -1,3 +1,5 @@
 .env
 *.env
 node_modules/
+AI-Capital-v2/data/.auto-devlog.log
+investment-command-center/web/config.js
