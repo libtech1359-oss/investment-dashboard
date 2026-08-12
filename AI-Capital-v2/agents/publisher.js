@@ -449,6 +449,30 @@ function buildWatchPoints(mkt) {
 
 // ── コンテキスト構築 ─────────────────────────────────────────
 
+// システム内部のエラー文言（オペレーション中断・HARD RULEのシステム異常検知等）を
+// 記事本文に技術的因果として断定させないための表示用サニタイズ。
+// signalAggregator.js の detectHardIssue / evaluateSecretaryTieBreak が生成する
+// 「システム異常/エラーを検知」系の文言のみを対象とし、市場要因によるHARD RULE
+// （portfolio_status取得不可・重大リスクイベント等）は対象外（実際の市場根拠のため）。
+// final_decisions/agent_votes 等の生データ自体は変更せず、LLMへ渡す表示文言のみを変換する。
+const SYSTEM_ERROR_PATTERN = /システム異常\/エラー|システムエラー|Operation was aborted|JSON解析失敗|分析スキップ/i;
+
+function sanitizeDecisionReasonForArticle(reason) {
+  if (!reason) return reason;
+  if (SYSTEM_ERROR_PATTERN.test(reason)) {
+    return '部署間で意見が分かれ、現時点で明確な買付方向を決定する根拠が不足していたため。';
+  }
+  return reason;
+}
+
+function sanitizeVoteCommentForArticle(comment) {
+  if (!comment) return comment;
+  if (SYSTEM_ERROR_PATTERN.test(comment)) {
+    return '十分な根拠が得られず見送り。';
+  }
+  return comment;
+}
+
 async function buildContext(date, decisions, votes, recs) {
   // positions/pending は portfolio_status.{positions,pending}_json から取得（Single Source of Truth）
   const [mkt, pf, candidates] = await Promise.all([
@@ -486,7 +510,7 @@ async function buildContext(date, decisions, votes, recs) {
   if (votes.length > 0) {
     lines.push('【各部署の投票・コメント】');
     votes.forEach(v => {
-      lines.push(`${v.department}: ${v.signal}(${v.confidence}%) — ${v.comment}`);
+      lines.push(`${v.department}: ${v.signal}(${v.confidence}%) — ${sanitizeVoteCommentForArticle(v.comment)}`);
     });
   }
 
@@ -509,7 +533,7 @@ async function buildContext(date, decisions, votes, recs) {
       `シグナル: ${decision.final_signal}\n` +
       `対象銘柄: ${decision.target_asset || 'なし'}\n` +
       `金額: ${amtStr}\n` +
-      `根拠: ${decision.reason}`
+      `根拠: ${sanitizeDecisionReasonForArticle(decision.reason)}`
     );
   }
 
@@ -817,6 +841,37 @@ function applyPostProcessing(rawNote, ctx) {
   if (recs.length > 0) {
     note = injectRecommendations(note, recs);
     console.log(`[publisher] 【最終提案】ブロック挿入: ${recs.length}部署`);
+  }
+
+  // 後処理⑩a: 審査部の「判断：」行が、機械挿入された「推奨：」（見送り）と矛盾する場合に是正する
+  // （LLMが鬼塚ガイの実際の推奨（WAIT/見送り）を無視し、買付方向の判断ラベルを書いてしまうケースの安全網。
+  //   要約本文には手を加えず、矛盾したラベル語のみを置き換える）
+  {
+    const GAI_HEADER = '### 審査部（鬼塚ガイ）';
+    const headerIdx  = note.indexOf(GAI_HEADER);
+    if (headerIdx >= 0) {
+      const afterHeader = headerIdx + GAI_HEADER.length;
+      const nextSection = note.indexOf('\n### ', afterHeader);
+      const nextMajor    = note.indexOf('\n## ',  afterHeader);
+      let sectionEnd = note.length;
+      if (nextSection >= 0) sectionEnd = Math.min(sectionEnd, nextSection);
+      if (nextMajor   >= 0) sectionEnd = Math.min(sectionEnd, nextMajor);
+      const section = note.slice(headerIdx, sectionEnd);
+
+      const recLineMatch = section.match(/推奨[：:]\s*\n?([^\n]+)/);
+      const isWaiveRec = recLineMatch && recLineMatch[1].trim() === '今回は見送ります';
+      const BUY_DIRECTION_WORDS = /(構築推奨|買付推奨|積み増し推奨|打診買い推奨|構築を推奨|買付を推奨)/;
+
+      if (isWaiveRec) {
+        const fixedSection = section.replace(/(判断[：:]\s*)([^\n]+)/, (m, p1, p2) => {
+          return BUY_DIRECTION_WORDS.test(p2) ? `${p1}様子見支持` : m;
+        });
+        if (fixedSection !== section) {
+          note = note.slice(0, headerIdx) + fixedSection + note.slice(sectionEnd);
+          console.log('[publisher] 後処理⑩a: 審査部「判断：」を推奨（見送り）と整合するよう是正');
+        }
+      }
+    }
   }
 
   // 後処理⑪: 空プレースホルダー除去（②③に「省略可」「なし」等が残った場合）
@@ -1419,4 +1474,4 @@ async function publish(date) {
   };
 }
 
-module.exports = { publish };
+module.exports = { publish, buildContext, applyPostProcessing };
