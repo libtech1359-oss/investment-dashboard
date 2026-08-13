@@ -216,23 +216,56 @@ AI社員たちが市場データをどう分析し、どんな議論を経て結
 投稿文のみ。ラベル・説明・番号・前置き一切不要。
 `.trim();
 
+// ── 部署見出し検出（###の有無・絵文字の有無どちらでも一致させる） ──────
+// 品質改善ループの再生成では、直前の完全後処理済みテキスト（###除去済み・絵文字付与済み）を
+// 「前回生成した記事全文」としてLLMに渡して修正させるため、2周目以降のLLM生の出力見出しが
+// 「### 部署名（キャラ名）」ではなく「😎 部署名（キャラ名）」（###なし）になることがある
+// （2026-08-13に判明。この形式ズレにより、以前は machine挿入が無言でスキップされていた）。
+// note.indexOf() による厳密一致ではなく、### の有無・絵文字の有無を両方許容するregexで検出する。
+const DEPT_HEADER_META = {
+  'マーケット分析部':     { full: 'マーケット分析部（神谷シン）',     emoji: '😎' },
+  'リスク管理部':         { full: 'リスク管理部（黒崎ミサキ）',       emoji: '🤨' },
+  'ポートフォリオ管理部': { full: 'ポートフォリオ管理部（橘アオイ）', emoji: '🙂' },
+  '審査部':               { full: '審査部（鬼塚ガイ）',               emoji: '🧐' },
+};
+
+function escapeRegExpPub(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findDeptHeader(note, dept) {
+  const meta = DEPT_HEADER_META[dept];
+  if (!meta) return null;
+  const re = new RegExp(`#{0,3}\\s*(?:${meta.emoji}\\s*)?${escapeRegExpPub(meta.full)}`);
+  const m = re.exec(note);
+  return m ? { index: m.index, length: m[0].length } : null;
+}
+
+// 部署セクションの終端（次の部署見出し・次のメジャーセクション見出しのいずれか手前）を求める。
+// ### 有無・絵文字有無のどちらの状態でも対応する。
+function findDeptSectionEnd(note, fromIndex) {
+  const candidates = [
+    note.indexOf('\n### ', fromIndex),
+    note.indexOf('\n## ',  fromIndex),
+  ];
+  const emojiRe = /\n(?:😎|🤨|🙂|🧐|⚖️)/;
+  const rest = note.slice(fromIndex);
+  const emojiMatch = emojiRe.exec(rest);
+  if (emojiMatch) candidates.push(fromIndex + emojiMatch.index);
+  const valid = candidates.filter(p => p >= 0);
+  return valid.length > 0 ? Math.min(...valid) : note.length;
+}
+
 // ── 【最終提案】ブロックを各部署セクションへ機械的に挿入 ──────
 // LLMの出力形式に依存せず確実にフォーマットを統一する。
-// 各 "### 部署名（キャラ名）" の末尾（次の ##/### の直前）に挿入する。
+// 各部署見出しの末尾（次の見出しの直前）に挿入する。
 function injectRecommendations(note, recs) {
-  const DEPT_HEADERS = {
-    'マーケット分析部':     '### マーケット分析部（神谷シン）',
-    'ポートフォリオ管理部': '### ポートフォリオ管理部（橘アオイ）',
-    'リスク管理部':         '### リスク管理部（黒崎ミサキ）',
-    '審査部':               '### 審査部（鬼塚ガイ）',
-  };
-
   for (const rec of recs) {
-    const header = DEPT_HEADERS[rec.department];
-    if (!header) continue;
+    if (!DEPT_HEADER_META[rec.department]) continue;
 
-    const headerIdx = note.indexOf(header);
-    if (headerIdx < 0) continue;
+    const header = findDeptHeader(note, rec.department);
+    if (!header) continue;
+    const headerIdx = header.index;
 
     // agent_recommendations は amount / department_recommendations は recommended_amount
     const amt = parseInt(rec.amount || rec.recommended_amount || 0);
@@ -248,14 +281,7 @@ function injectRecommendations(note, recs) {
 
     // 次のセクション見出しの直前に挿入
     const afterHeader = headerIdx + header.length;
-    const nextSection = note.indexOf('\n### ', afterHeader);
-    const nextMajor   = note.indexOf('\n## ',  afterHeader);
-
-    let insertPos;
-    if (nextSection < 0 && nextMajor < 0) insertPos = note.length;
-    else if (nextSection < 0) insertPos = nextMajor;
-    else if (nextMajor   < 0) insertPos = nextSection;
-    else insertPos = Math.min(nextSection, nextMajor);
+    const insertPos = findDeptSectionEnd(note, afterHeader);
 
     // 既に「推奨：」がある場合はスキップ（二重挿入防止）
     const sectionContent = note.slice(headerIdx, insertPos);
@@ -322,6 +348,35 @@ function injectRecommendationSummary(note, recs, decision, pf) {
     `金額：${finalAmt > 0 ? `¥${finalAmt.toLocaleString()}` : 'なし'}`,
     `部署判断：${voteParts.length > 0 ? voteParts.join(' ') : 'データなし'}`,
   ];
+
+  // 採用経路（どの部署の提案を採用したか）を実データのみから機械判定する。LLMには推測させない。
+  // department_recommendations/agent_recommendations と資産名・金額が完全一致する部署があれば
+  // その部署の提案採用とみなす。金額のみ集約ロジックで調整されている場合は資産一致のみで判定する。
+  if (assetName !== 'なし' && finalAmt > 0) {
+    const exactMatch = DEPT_ORDER
+      .map(dept => recs.find(r => r.department === dept))
+      .find(r => {
+        if (!r) return false;
+        const rAction = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
+        const rAsset  = r.asset_name || 'なし';
+        const rAmt    = parseInt(r.amount || r.recommended_amount || 0);
+        return ['BUY', 'ACCUMULATE'].includes(rAction) && rAsset === assetName && rAmt === finalAmt;
+      });
+    if (exactMatch) {
+      lines.push(`採用：${DEPT_FIRST_NAME[exactMatch.department]}の提案（${assetName} ¥${finalAmt.toLocaleString()}）を採用`);
+    } else {
+      const assetOnlyMatch = DEPT_ORDER
+        .map(dept => recs.find(r => r.department === dept))
+        .find(r => {
+          if (!r) return false;
+          const rAction = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
+          return ['BUY', 'ACCUMULATE'].includes(rAction) && (r.asset_name || 'なし') === assetName;
+        });
+      lines.push(assetOnlyMatch
+        ? `採用：${DEPT_FIRST_NAME[assetOnlyMatch.department]}が提案した銘柄（${assetName}）を採用し、金額は集計ロジックにより¥${finalAmt.toLocaleString()}に決定`
+        : `採用：特定部署の提案そのままではなく、複数部署の意見を踏まえた総合判断`);
+    }
+  }
 
   const block = lines.join('\n') + '\n\n';
 
@@ -784,20 +839,16 @@ function applyPostProcessing(rawNote, ctx) {
   note = note.replace(/打診買い/g, '観測ポジション構築');
 
   // 後処理⑦: 整合性ウォーニング（部署要約に推奨銘柄の言及があるか確認）
+  // 実際のブロッキング判定は articleValidator.js の Rule 37/39 が担当する。ここは早期ログのみ。
   {
-    const DEPT_SECTION_PATTERN = {
-      'マーケット分析部': /### マーケット分析部[\s\S]*?(?=###|##|$)/,
-      'リスク管理部':     /### リスク管理部[\s\S]*?(?=###|##|$)/,
-      'ポートフォリオ管理部': /### ポートフォリオ管理部[\s\S]*?(?=###|##|$)/,
-      '審査部':           /### 審査部[\s\S]*?(?=###|##|$)/,
-    };
     for (const r of recs) {
       const asset = r.asset_name || 'なし';
       const amt   = parseInt(r.amount || r.recommended_amount || 0);
       if (asset === 'なし' || amt === 0) continue;
-      const pat = DEPT_SECTION_PATTERN[r.department];
-      if (!pat) continue;
-      const section = note.match(pat)?.[0] || '';
+      const header = findDeptHeader(note, r.department);
+      if (!header) continue;
+      const sectionEnd = findDeptSectionEnd(note, header.index + header.length);
+      const section = note.slice(header.index, sectionEnd);
       if (section && !section.includes(asset)) {
         console.warn(`[publisher] ⚠️ 整合性: ${r.department} の要約に推奨銘柄「${asset}」の言及なし`);
       }
@@ -814,6 +865,7 @@ function applyPostProcessing(rawNote, ctx) {
   note = note.replace(/^金額[：:][^\n]*\n?/gm, '');       // ⑭で再注入されるため先に除去
   note = note.replace(/^根拠[：:][^\n]*\n?/gm, '');       // LLMが最終判断内に書いた冗長行を除去
   note = note.replace(/^部署判断[：:][^\n]*\n?/gm, '');   // ⑭で再注入されるため先に除去
+  note = note.replace(/^採用[：:][^\n]*\n?/gm, '');       // ⑭で再注入されるため先に除去
 
   // 後処理⑧c: LLM生成の 🆔 行を除去（記事番号・task-id の誤記フォーマット）
   // 📋 AC-YYYY-NNNN は ⑨ で機械挿入するため、LLM が 🆔 で書いた版はすべて除去する
@@ -843,33 +895,28 @@ function applyPostProcessing(rawNote, ctx) {
     console.log(`[publisher] 【最終提案】ブロック挿入: ${recs.length}部署`);
   }
 
-  // 後処理⑩a: 審査部の「判断：」行が、機械挿入された「推奨：」（見送り）と矛盾する場合に是正する
-  // （LLMが鬼塚ガイの実際の推奨（WAIT/見送り）を無視し、買付方向の判断ラベルを書いてしまうケースの安全網。
-  //   要約本文には手を加えず、矛盾したラベル語のみを置き換える）
-  {
-    const GAI_HEADER = '### 審査部（鬼塚ガイ）';
-    const headerIdx  = note.indexOf(GAI_HEADER);
-    if (headerIdx >= 0) {
-      const afterHeader = headerIdx + GAI_HEADER.length;
-      const nextSection = note.indexOf('\n### ', afterHeader);
-      const nextMajor    = note.indexOf('\n## ',  afterHeader);
-      let sectionEnd = note.length;
-      if (nextSection >= 0) sectionEnd = Math.min(sectionEnd, nextSection);
-      if (nextMajor   >= 0) sectionEnd = Math.min(sectionEnd, nextMajor);
-      const section = note.slice(headerIdx, sectionEnd);
+  // 後処理⑩a: 各部署の「判断：」行が、機械挿入された「推奨：」（見送り）と矛盾する場合に是正する
+  // （LLMが実際の推奨（WAIT/DEFEND＝見送り）を無視し、買付方向の判断ラベルを書いてしまうケースの安全網。
+  //   要約本文には手を加えず、矛盾したラベル語のみを置き換える。以前は審査部のみ対象だったが、
+  //   同種の矛盾は他部署でも起こり得るため2026-08-13に全部署へ一般化した）
+  for (const dept of Object.keys(DEPT_HEADER_META)) {
+    const header = findDeptHeader(note, dept);
+    if (!header) continue;
+    const headerIdx  = header.index;
+    const sectionEnd = findDeptSectionEnd(note, headerIdx + header.length);
+    const section = note.slice(headerIdx, sectionEnd);
 
-      const recLineMatch = section.match(/推奨[：:]\s*\n?([^\n]+)/);
-      const isWaiveRec = recLineMatch && recLineMatch[1].trim() === '今回は見送ります';
-      const BUY_DIRECTION_WORDS = /(構築推奨|買付推奨|積み増し推奨|打診買い推奨|構築を推奨|買付を推奨)/;
+    const recLineMatch = section.match(/推奨[：:]\s*\n?([^\n]+)/);
+    const isWaiveRec = recLineMatch && recLineMatch[1].trim() === '今回は見送ります';
+    const BUY_DIRECTION_WORDS = /(構築推奨|買付推奨|積み増し推奨|打診買い推奨|構築を推奨|買付を推奨)/;
 
-      if (isWaiveRec) {
-        const fixedSection = section.replace(/(判断[：:]\s*)([^\n]+)/, (m, p1, p2) => {
-          return BUY_DIRECTION_WORDS.test(p2) ? `${p1}様子見支持` : m;
-        });
-        if (fixedSection !== section) {
-          note = note.slice(0, headerIdx) + fixedSection + note.slice(sectionEnd);
-          console.log('[publisher] 後処理⑩a: 審査部「判断：」を推奨（見送り）と整合するよう是正');
-        }
+    if (isWaiveRec) {
+      const fixedSection = section.replace(/(判断[：:]\s*)([^\n]+)/, (m, p1, p2) => {
+        return BUY_DIRECTION_WORDS.test(p2) ? `${p1}様子見支持` : m;
+      });
+      if (fixedSection !== section) {
+        note = note.slice(0, headerIdx) + fixedSection + note.slice(sectionEnd);
+        console.log(`[publisher] 後処理⑩a: ${dept}の「判断：」を推奨（見送り）と整合するよう是正`);
       }
     }
   }
@@ -1474,4 +1521,4 @@ async function publish(date) {
   };
 }
 
-module.exports = { publish, buildContext, applyPostProcessing };
+module.exports = { publish, buildContext, applyPostProcessing, injectRecommendations, injectRecommendationSummary };

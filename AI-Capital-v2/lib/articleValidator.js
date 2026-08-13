@@ -473,6 +473,20 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     return (nextIdx >= 0 ? after.slice(0, nextIdx) : after.slice(0, 500)).trim();
   }
 
+  // department_recommendations/agent_recommendations の日本語部署名 → DEPT_HEADERS のキー
+  const DEPT_KEY_BY_NAME = {
+    'マーケット分析部':     'shin',
+    'リスク管理部':         'misaki',
+    'ポートフォリオ管理部': 'aoi',
+    '審査部':               'gai',
+  };
+  const DEPT_FIRST_NAME_BY_NAME = {
+    'マーケット分析部':     '神谷',
+    'リスク管理部':         '黒崎',
+    'ポートフォリオ管理部': 'アオイ',
+    '審査部':               '鬼塚',
+  };
+
   // ── Rule 18: 部署見出しの重複掲載 ────────────────────────────
   const DEPT_HEADER_GLOBAL = [
     ['マーケット分析部', /😎[^\n]*マーケット分析部/g],
@@ -881,6 +895,156 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
         if (tooShort || (!hasNumericEvidence && !hasReasonConnector)) {
           warnings.push(warn(36, '最終判断がWAIT（見送り）ですが、見送り理由に具体的な数値・根拠が示されていません',
             ['最終判断本文', [reasonText.slice(0, 150) || '（空）']],
+          ));
+        }
+      }
+    }
+  }
+
+  // ── Rule 37: 部署の「推奨：」行が実データ（department_recommendations等）と一致しているか ──
+  // publisher.js の injectRecommendations() が機械挿入する「推奨：」行を検証する。LLMの自由記述
+  // ではなくシステムが直接データから書いた行が対象のため、欠落・不一致＝機械挿入自体が失敗した
+  // （部署見出し検出失敗等）ことを意味し、必ずFAILとする（2026-08-13の判断履歴トレーサビリティ
+  // 断絶インシデントを受けて新設）。
+  for (const r of (recs ?? [])) {
+    const deptKey = DEPT_KEY_BY_NAME[r.department];
+    if (!deptKey) continue;
+    const body = extractDeptBody(DEPT_HEADERS[deptKey].pattern);
+    if (!body) continue; // 見出し自体が無い場合はRule10/20が別途検知する
+
+    const amt    = parseInt(r.amount ?? r.recommended_amount ?? 0);
+    const action = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
+    const asset  = r.asset_name || 'なし';
+    const isConcreteBuy = amt > 0 && asset !== 'なし' && !['WAIT', 'DEFEND'].includes(action);
+    const expectedLine  = isConcreteBuy ? `${asset} ¥${amt.toLocaleString()}` : '今回は見送ります';
+
+    const recMatch = body.match(/推奨[：:]\s*\n?([^\n]+)/);
+    if (!recMatch) {
+      warnings.push(warn(37, `${r.department}の「推奨：」行が記事内に見つかりません（機械挿入の失敗の可能性）`,
+        ['実データ（department_recommendations）', [expectedLine]],
+      ));
+      continue;
+    }
+    const actualLine = recMatch[1].trim();
+    if (actualLine !== expectedLine) {
+      warnings.push(warn(37, `${r.department}の推奨内容が実データと一致しません`,
+        ['実データ（department_recommendations）', [expectedLine]],
+        ['記事内の推奨',                            [actualLine]],
+      ));
+    }
+  }
+
+  // ── Rule 38: 見送り部署の判断ラベルが買付方向の表現になっていないか ────────────
+  // 以前は審査部のみ後処理⑩aで是正していたが、機械是正が失敗した場合の安全網として
+  // 全部署を対象にブロッキングチェックする。
+  {
+    const BUY_LABEL_RE = /(構築推奨|買付推奨|積み増し推奨|打診買い推奨|構築を推奨|買付を推奨|買付準備中|段階的打診|買付検討)/;
+    for (const r of (recs ?? [])) {
+      const deptKey = DEPT_KEY_BY_NAME[r.department];
+      if (!deptKey) continue;
+      const action = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
+      if (!['WAIT', 'DEFEND'].includes(action)) continue;
+
+      const body = extractDeptBody(DEPT_HEADERS[deptKey].pattern);
+      if (!body) continue;
+      const labelMatch = body.match(/判断[：:]\s*([^\n]+)/);
+      if (labelMatch && BUY_LABEL_RE.test(labelMatch[1])) {
+        warnings.push(warn(38, `${r.department}は見送り（${action}）ですが、判断ラベルが買付方向の表現になっています`,
+          ['実データ',           ['見送り']],
+          ['記事内の判断ラベル', [labelMatch[1].trim()]],
+        ));
+      }
+    }
+  }
+
+  // ── Rule 39: 部署の要約が、自身の実際の推奨資産と異なる資産を提案として言及していないか ──
+  // 例：神谷シンの実際の推奨はNASDAQ100なのに、要約文中で「S&P500を...提案します」のように
+  // 別資産を自分の提案として書いてしまうLLMのハルシネーションを検知する
+  // （2026-08-13の実インシデントより新設）。
+  {
+    const PROPOSE_VERB = '(提案します|提案する|推奨します|推奨する|積み増すことを提案|組み込むことを提案)';
+    for (const r of (recs ?? [])) {
+      const deptKey = DEPT_KEY_BY_NAME[r.department];
+      if (!deptKey) continue;
+      const asset = r.asset_name || 'なし';
+      if (asset === 'なし') continue;
+
+      const body = extractDeptBody(DEPT_HEADERS[deptKey].pattern);
+      if (!body) continue;
+      // 「推奨：」行（機械挿入・正しい）より前の自由記述部分のみを対象とする
+      const summaryOnly = body.split(/推奨[：:]/)[0];
+
+      const otherAssetNames = (candidates ?? [])
+        .map(c => c.asset_name)
+        .filter(name => name && name !== asset);
+
+      for (const otherName of otherAssetNames) {
+        const re = new RegExp(`${escapeRegExp(otherName)}[^。\\n]{0,15}${PROPOSE_VERB}`);
+        const m = summaryOnly.match(re);
+        if (m) {
+          warnings.push(warn(39, `${r.department}の要約が、実際の推奨資産（${asset}）と異なる資産（${otherName}）を提案として記載しています`,
+            ['実際の推奨資産（department_recommendations）', [asset]],
+            ['検出した記述',                                  [m[0]]],
+          ));
+        }
+      }
+    }
+  }
+
+  // ── Rule 40: ⚖️最終判断の機械挿入ブロックがfinal_decisionsと一致しているか ────────
+  // publisher.js の injectRecommendationSummary() が正しく実行されていれば必ず一致するはずだが、
+  // 見出し検出失敗等で機械挿入自体がスキップされた場合を検知する安全網。
+  if (decision) {
+    const SIGNAL_JA_MAP = { BUY: '買付', ACCUMULATE: '観測ポジション構築', WAIT: '監視継続', DEFEND: '防御態勢', SELL: '売却' };
+    const finalDecisionBody   = extractSectionBody(note, [/⚖️[^\n]*最終判断/, /最終判断/]);
+    const expectedSignalLabel = SIGNAL_JA_MAP[finalSignal] || finalSignal;
+
+    const sigMatch = finalDecisionBody.match(/シグナル[：:]\s*([^\n]+)/);
+    if (!sigMatch || sigMatch[1].trim() !== expectedSignalLabel) {
+      warnings.push(warn(40, '⚖️最終判断のシグナル表記がfinal_decisionsと一致しません（機械挿入の失敗の可能性）',
+        ['final_decisions.final_signal', [`${finalSignal}（${expectedSignalLabel}）`]],
+        ['記事内',                        [sigMatch ? sigMatch[1].trim() : '（未検出）']],
+      ));
+    }
+    const assetMatch = finalDecisionBody.match(/対象[：:]\s*([^\n]+)/);
+    if (!assetMatch || assetMatch[1].trim() !== finalAsset) {
+      warnings.push(warn(40, '⚖️最終判断の対象銘柄表記がfinal_decisionsと一致しません（機械挿入の失敗の可能性）',
+        ['final_decisions.target_asset', [finalAsset]],
+        ['記事内',                        [assetMatch ? assetMatch[1].trim() : '（未検出）']],
+      ));
+    }
+    const expectedAmtText = finalAmount > 0 ? `¥${finalAmount.toLocaleString()}` : 'なし';
+    const amtMatch = finalDecisionBody.match(/金額[：:]\s*([^\n]+)/);
+    if (!amtMatch || amtMatch[1].trim() !== expectedAmtText) {
+      warnings.push(warn(40, '⚖️最終判断の金額表記がfinal_decisionsと一致しません（機械挿入の失敗の可能性）',
+        ['final_decisions.amount', [expectedAmtText]],
+        ['記事内',                  [amtMatch ? amtMatch[1].trim() : '（未検出）']],
+      ));
+    }
+  }
+
+  // ── Rule 41: 最終判断の採用経路（採用：行）が実データと矛盾していないか ────────────
+  // 「誰の提案を採用したか」をLLMに推測させず機械判定した結果（injectRecommendationSummaryの
+  // 採用：行）を検証する。買付シグナルなのに採用：行が無い、または実際に資産・金額が完全一致
+  // する部署提案が存在するのにそれと異なる部署名が書かれている場合はFAILとする。
+  if (isBuySignal && finalAsset && finalAsset !== 'なし') {
+    const finalDecisionBody = extractSectionBody(note, [/⚖️[^\n]*最終判断/, /最終判断/]);
+    const adoptMatch = finalDecisionBody.match(/採用[：:]\s*([^\n]+)/);
+    if (!adoptMatch) {
+      warnings.push(warn(41, '⚖️最終判断に採用経路（採用：行）が見つかりません（機械挿入の失敗の可能性）'));
+    } else {
+      const exactDeptMatch = (recs ?? []).find(r => {
+        const rAmt    = parseInt(r.amount ?? r.recommended_amount ?? 0);
+        const rAsset  = r.asset_name || 'なし';
+        const rAction = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
+        return rAsset === finalAsset && rAmt === finalAmount && ['BUY', 'ACCUMULATE'].includes(rAction);
+      });
+      if (exactDeptMatch) {
+        const expectedName = DEPT_FIRST_NAME_BY_NAME[exactDeptMatch.department];
+        if (expectedName && !adoptMatch[1].includes(expectedName)) {
+          warnings.push(warn(41, '採用経路の記載が、実際に完全一致する部署提案と異なります',
+            ['実際に完全一致する部署', [`${exactDeptMatch.department}（${finalAsset} ¥${finalAmount.toLocaleString()}）`]],
+            ['記事内の採用：行',       [adoptMatch[1].trim()]],
           ));
         }
       }
