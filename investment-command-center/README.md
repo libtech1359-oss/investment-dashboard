@@ -1,8 +1,14 @@
-# Investment Command Center (v1)
+# Investment Command Center (v1.1)
 
 AI Capital v2 の状態を閲覧するための、個人専用・非公開の読み取り専用ダッシュボード。
 AI-Capital-v2 本体（Discordボット・スケジューラ・既存GASプロジェクト）とは完全に独立しており、
 本体側のコードは一切変更しない前提で追加された。
+
+## 主な機能
+
+- **TODAY** — `dashboard` API 1回取得で市況・ポートフォリオ・FINAL DECISION・DEPARTMENT MEETING・HOLDINGS・CANDIDATESを表示
+- **DEPARTMENT詳細モーダル**（v1.1） — DEPARTMENT MEETINGの各部署カード（神谷シン/橘アオイ/黒崎ミサキ/鬼塚ガイ）をクリックすると、部署名・役割・SIGNAL・confidence・コメント全文（API原文のまま、要約・改変なし）を表示。`recommendation_asset`/`recommendation_amount`があれば併記
+- **HISTORYモード**（v1.1） — ヘッダーのTODAY/HISTORY切替、前日/翌日/TODAYボタンとdate inputで過去日を選択し、その日のFINAL DECISION・DEPARTMENT MEETING・CANDIDATES・ORDERSを表示。未来日は選択不可。`votes`/`decision`/`candidates`は日付単位でクライアントキャッシュし、同一日付の再選択ではAPIを再取得しない。ORDERSは`type=orders`にdateパラメータを追加せず、`limit=100`取得後にクライアント側で該当日をフィルタ
 
 ## 構成
 
@@ -74,8 +80,20 @@ investment-command-center/
 
 **v1として凍結。**
 
-## v1.1 改善候補（未実装・記録のみ）
+## QA履歴（2026-08-13, v1.1）
 
-- **ORDERS/HISTORYのローディング表示・タイムアウト表示**
-  - 背景: GAS側インフラの一時的な遅延により、まれに30秒以上応答が返らないケースをQA中に観測（直後の再試行では1〜2秒に回復する一過性の事象）。現状のUIには「取得中」を示す表示がなく、遅延時にユーザーが「動作していない」と誤解する可能性がある
-  - 対応案（次フェーズ）: ORDERS/HISTORY展開時に読み込み中インジケータを表示し、一定時間（例: 20秒程度）応答がない場合はタイムアウトメッセージを表示する
+- 追加機能: DEPARTMENT詳細モーダル、HISTORYモード（日付ナビゲーション・過去日のFINAL DECISION/DEPARTMENT MEETING/CANDIDATES/ORDERS・日付単位キャッシュ）
+- Playwrightで375px/768px/1440pxの3幅を実測: TODAY初期表示・部署カード→モーダル→クローズ（ボタン/オーバーレイクリック両方）・TODAY⇄HISTORY切替・前日移動・date input・過去日の各セクション表示・横スクロールなし・console error 0件・pageerror 0件を確認
+- APIエラー（unauthorizedをモック）時もTODAY/HISTORY双方でクラッシュせず既存のエラー表示方式が機能することを確認
+- キャッシュ動作: 初回HISTORY表示後、既に取得済みの日付へ戻ってもAPI再取得が発生しないことをネットワークログで実測
+- 実装中に発見した「モーダルoverlayが`hidden`属性でも`display:flex`に上書きされ常時全画面を覆っていた」CSS不具合は`.modal-overlay[hidden] { display: none; }`の追加のみで解消
+
+**v1.1として凍結。**
+
+## 今後の改善候補（未実装・記録のみ）
+
+- **ORDERS/HISTORY（TODAY側の展開パネル）のタイムアウト表示**
+  - 背景: GAS側インフラの一時的な遅延により、まれに30秒以上応答が返らないケースをQA中に観測（直後の再試行では1〜2秒に回復する一過性の事象）。v1.1でHISTORYモードには`LOADING...`表示を追加したが、明示的なタイムアウトメッセージ（例: 20秒超過時の表示）は未実装
+  - 対応案（次フェーズ）: 一定時間応答がない場合にタイムアウトメッセージを表示する
+- HISTORY用ORDERSは`limit=100`取得+クライアント側フィルタのため、100件より古い注文がある日付では取得漏れが起きうる（現状データ量では未発生）
+- date inputのブラウザネイティブUIはダークテーマとの統一感がやや弱い（特にSafari）

@@ -89,6 +89,33 @@ body {
   color: var(--text-faint);
 }
 
+/* ---- Mode tabs (TODAY / HISTORY) ---- */
+.mode-tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+.mode-tab {
+  flex: 1;
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 1px;
+  padding: 7px;
+  cursor: pointer;
+}
+.mode-tab:hover { color: var(--text); border-color: var(--text-dim); }
+.mode-tab.active {
+  color: var(--bg);
+  background: var(--green);
+  border-color: var(--green);
+  border-style: solid;
+  font-weight: 700;
+}
+
 /* ---- Fear & Greed / Market ---- */
 .dual-col {
   display: grid;
@@ -193,9 +220,29 @@ body {
   gap: 8px;
   text-align: center;
 }
-.dept-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.dept-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.dept-cell:hover, .dept-cell:focus {
+  background: rgba(61, 220, 132, 0.08);
+  outline: none;
+}
 .dept-name { font-size: 10px; color: var(--text); white-space: nowrap; }
 .dept-pct  { font-size: 12px; font-weight: 700; color: var(--text-dim); }
+.dept-hint {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-faint);
+  text-align: center;
+  letter-spacing: 0.5px;
+}
 
 /* ---- Holdings ---- */
 .holdings-table { font-size: 11px; }
@@ -249,6 +296,146 @@ body {
 
 .chart-wrap { margin-top: 8px; }
 
+/* ---- History mode: date navigation ---- */
+.hist-date-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hist-nav-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hist-nav-btn:hover:not(:disabled) { color: var(--text); border-color: var(--text-dim); }
+.hist-nav-btn:disabled { opacity: .4; cursor: default; }
+
+.hist-date-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 6px;
+}
+.hist-date-input::-webkit-calendar-picker-indicator { filter: invert(0.6); cursor: pointer; }
+
+.hist-today-btn {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 0 10px;
+  height: 30px;
+  cursor: pointer;
+}
+.hist-today-btn:hover:not(:disabled) { color: var(--text); border-color: var(--text-dim); }
+.hist-today-btn:disabled { opacity: .4; cursor: default; }
+
+.hist-loading {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--amber);
+  letter-spacing: 1px;
+}
+
+/* ---- Department detail modal ---- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+.modal-overlay[hidden] { display: none; }
+.modal-box {
+  width: 100%;
+  max-width: 380px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 18px;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.modal-dept-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.modal-close {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); border-color: var(--text-dim); }
+.modal-role {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+.modal-signal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.modal-confidence {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.modal-comment {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+.modal-extra { margin-top: 12px; }
+.modal-extra-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 3px 0;
+  border-top: 1px dashed var(--border);
+}
+.modal-extra-row:first-child { border-top: none; }
+.modal-extra-row span:last-child { color: var(--text); font-weight: 600; }
+
 /* ---- Footer ---- */
 .footer-section {
   display: flex;
@@ -285,4 +472,5 @@ body {
 @media (max-width: 380px) {
   .dual-col { grid-template-columns: 1fr; gap: 20px; }
   .portfolio-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .hist-date-input { font-size: 10px; padding: 6px 3px; }
 }

@@ -16,6 +16,13 @@ const DEPT_PERSON = {
   '審査部':               '鬼塚ガイ',
 };
 
+const DEPT_ROLE = {
+  'マーケット分析部':     '市場機会の発見担当（銘柄選定・エントリータイミング）',
+  'ポートフォリオ管理部': '資産配分・提案額算出担当（銘柄選定は行わない）',
+  'リスク管理部':         '提案へのリスク可視化担当（集中投資率・現金比率・分散度）',
+  '審査部':               '他部署の議論審査 + 独立した投票・推奨',
+};
+
 const SIGNAL_CLASS = {
   BUY: 'sig-BUY', ACCUMULATE: 'sig-ACCUMULATE', WAIT: 'sig-WAIT',
   DEFEND: 'sig-DEFEND', SELL: 'sig-SELL',
@@ -23,6 +30,13 @@ const SIGNAL_CLASS = {
 
 let historyChart = null;
 let historyLoaded = false;
+
+/* ---- HISTORY mode state ---- */
+let currentMode = 'today';
+let histDate = null;                 // 'yyyy-MM-dd'
+const historyCache = {};             // date -> { votes, decision, candidates }
+let histRequestSeq = 0;
+let ordersFullPromise = null;        // type=orders は date非対応のため一度だけ取得しクライアント側でfilter
 
 /* ---- formatters ---- */
 function yenMan(n) {
@@ -149,16 +163,16 @@ function renderPortfolio(pf) {
 }
 
 /* ---- render: final decision ---- */
-function renderDecision(decision) {
-  const dot = document.getElementById('decision-dot');
-  const label = document.getElementById('decision-label');
-  const sub = document.getElementById('decision-sub');
+function renderDecisionInto(ids, decision, emptyText) {
+  const dot = document.getElementById(ids.dot);
+  const label = document.getElementById(ids.label);
+  const sub = document.getElementById(ids.sub);
 
   if (!decision) {
     dot.style.color = 'var(--gray)';
     label.textContent = '--';
     label.className = 'decision-label';
-    sub.textContent = '本日のデータはまだありません';
+    sub.textContent = emptyText;
     return;
   }
   const cls = SIGNAL_CLASS[decision.final_signal] || '';
@@ -174,10 +188,22 @@ function renderDecision(decision) {
   if (decision.reason) parts.push(decision.reason);
   sub.textContent = parts.join(' — ') || '-';
 }
+function renderDecision(decision) {
+  renderDecisionInto(
+    { dot: 'decision-dot', label: 'decision-label', sub: 'decision-sub' },
+    decision, '本日のデータはまだありません'
+  );
+}
+function renderHistDecision(decision) {
+  renderDecisionInto(
+    { dot: 'hist-decision-dot', label: 'hist-decision-label', sub: 'hist-decision-sub' },
+    decision, '該当日のデータはありません'
+  );
+}
 
-/* ---- render: department meeting ---- */
-function renderVotes(votes) {
-  const grid = document.getElementById('dept-grid');
+/* ---- render: department meeting (TODAY / HISTORY 共通) ---- */
+function renderDeptGrid(gridId, votes) {
+  const grid = document.getElementById(gridId);
   grid.innerHTML = '';
   const byDept = {};
   (votes || []).forEach(v => { byDept[v.department] = v; });
@@ -189,13 +215,56 @@ function renderVotes(votes) {
 
     const cell = document.createElement('div');
     cell.className = 'dept-cell';
+    cell.tabIndex = 0;
+    cell.setAttribute('role', 'button');
     cell.innerHTML =
       '<div class="dept-dot ' + cls + '"></div>' +
       '<div class="dept-name">' + escapeHtml(person) + '</div>' +
       '<div class="dept-pct">' + (v ? (v.confidence ?? '--') + '%' : '--') + '</div>';
-    cell.title = v ? (v.signal + ' — ' + (v.comment || '')) : '未投票';
+    cell.addEventListener('click', () => openDeptModal(dept, v));
+    cell.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDeptModal(dept, v); }
+    });
     grid.appendChild(cell);
   });
+}
+function renderVotes(votes) {
+  renderDeptGrid('dept-grid', votes);
+}
+
+/* ---- department detail modal ---- */
+function openDeptModal(dept, vote) {
+  const person = DEPT_PERSON[dept] || dept;
+  document.getElementById('modal-dept-name').textContent = person + '（' + dept + '）';
+  document.getElementById('modal-dept-role').textContent = DEPT_ROLE[dept] || '';
+
+  const cls = vote ? (SIGNAL_CLASS[vote.signal] || '') : '';
+  const dot = document.getElementById('modal-signal-dot');
+  dot.style.color = '';
+  dot.className = 'decision-dot ' + cls;
+  const label = document.getElementById('modal-signal-label');
+  label.textContent = vote ? (vote.signal || '--') : '未投票';
+  label.className = 'decision-label ' + cls;
+
+  document.getElementById('modal-confidence').textContent =
+    vote && vote.confidence !== null && vote.confidence !== undefined ? 'confidence ' + vote.confidence + '%' : '';
+
+  document.getElementById('modal-comment').textContent =
+    vote && vote.comment ? vote.comment : '(コメントなし)';
+
+  const extra = document.getElementById('modal-extra');
+  if (vote && (vote.recommendation_asset || vote.recommendation_amount !== null)) {
+    extra.innerHTML =
+      '<div class="modal-extra-row"><span>推奨銘柄</span><span>' + escapeHtml(vote.recommendation_asset || '--') + '</span></div>' +
+      '<div class="modal-extra-row"><span>推奨金額</span><span>' + (vote.recommendation_amount !== null && vote.recommendation_amount !== undefined ? yenFull(vote.recommendation_amount) : '--') + '</span></div>';
+  } else {
+    extra.innerHTML = '';
+  }
+
+  document.getElementById('dept-modal-overlay').removeAttribute('hidden');
+}
+function closeDeptModal() {
+  document.getElementById('dept-modal-overlay').setAttribute('hidden', '');
 }
 
 /* ---- render: holdings ---- */
@@ -217,9 +286,9 @@ function renderHoldings(positions) {
   }).join('');
 }
 
-/* ---- render: candidates ---- */
-function renderCandidates(candidates) {
-  const el = document.getElementById('candidates-list');
+/* ---- render: candidates (TODAY / HISTORY 共通) ---- */
+function renderCandidatesInto(elId, candidates) {
+  const el = document.getElementById(elId);
   if (!candidates || candidates.length === 0) {
     el.innerHTML = '<div class="dim-row">候補データなし</div>';
     return;
@@ -232,10 +301,12 @@ function renderCandidates(candidates) {
     '</div>'
   ).join('');
 }
+function renderCandidates(candidates) { renderCandidatesInto('candidates-list', candidates); }
+function renderHistCandidates(candidates) { renderCandidatesInto('hist-candidates-list', candidates); }
 
-/* ---- render: orders (on-demand) ---- */
-function renderOrders(orders) {
-  const el = document.getElementById('orders-list');
+/* ---- render: orders (TODAY on-demand / HISTORY 共通) ---- */
+function renderOrdersInto(elId, orders) {
+  const el = document.getElementById(elId);
   if (!orders || orders.length === 0) {
     el.innerHTML = '<div class="dim-row">注文履歴なし</div>';
     return;
@@ -247,6 +318,7 @@ function renderOrders(orders) {
     '</div>'
   ).join('');
 }
+function renderOrders(orders) { renderOrdersInto('orders-list', orders); }
 
 /* ---- render: history chart (on-demand) ---- */
 function renderHistoryChart(points) {
@@ -332,6 +404,117 @@ async function loadMoreSection() {
   }
 }
 
+/* ---- HISTORY mode: date helpers ---- */
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+function todayYMD() {
+  // API側（gas-readonly）はAsia/Tokyoで日付を正規化しているため、こちらも合わせる
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const map = {};
+  parts.forEach(p => { map[p.type] = p.value; });
+  return map.year + '-' + map.month + '-' + map.day;
+}
+function addDaysYMD(ymd, delta) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return dt.getUTCFullYear() + '-' + pad2(dt.getUTCMonth() + 1) + '-' + pad2(dt.getUTCDate());
+}
+
+function updateHistNavButtons() {
+  const isToday = histDate >= todayYMD();
+  document.getElementById('hist-next').disabled = isToday;
+  document.getElementById('hist-today-btn').disabled = isToday;
+}
+
+function initHistoryDate() {
+  histDate = todayYMD();
+  const input = document.getElementById('hist-date-input');
+  input.value = histDate;
+  input.max = todayYMD();
+  updateHistNavButtons();
+}
+
+function changeHistDate(newDate) {
+  histDate = newDate;
+  document.getElementById('hist-date-input').value = histDate;
+  updateHistNavButtons();
+  loadHistoryForDate(histDate);
+}
+
+/* ---- HISTORY mode: data fetch (votes / decision / candidates は date単位でキャッシュ) ---- */
+async function loadHistoryForDate(date) {
+  const loadingEl = document.getElementById('hist-loading');
+  const errorEl = document.getElementById('hist-error');
+  errorEl.hidden = true;
+  errorEl.textContent = '';
+
+  if (historyCache[date]) {
+    renderHistoryData(historyCache[date]);
+  } else {
+    const seq = ++histRequestSeq;
+    loadingEl.hidden = false;
+    try {
+      const [votesRes, decision, candidatesRes] = await Promise.all([
+        callApi({ type: 'votes', date }),
+        callApi({ type: 'decision', date }),
+        callApi({ type: 'candidates', date }),
+      ]);
+      if (seq !== histRequestSeq) return; // 途中で別の日付に切り替わった場合は破棄
+      const bundle = { votes: votesRes.votes, decision, candidates: candidatesRes.candidates };
+      historyCache[date] = bundle;
+      renderHistoryData(bundle);
+    } catch (err) {
+      if (seq !== histRequestSeq) return;
+      errorEl.hidden = false;
+      errorEl.textContent = '⚠ ' + err.message;
+      renderHistoryData({ votes: [], decision: null, candidates: [] });
+    } finally {
+      if (seq === histRequestSeq) loadingEl.hidden = true;
+    }
+  }
+
+  loadHistoryOrders(date);
+}
+
+function renderHistoryData(bundle) {
+  renderDeptGrid('hist-dept-grid', bundle.votes);
+  renderHistDecision(bundle.decision);
+  renderHistCandidates(bundle.candidates);
+}
+
+// type=orders は date パラメータ非対応（既存API仕様どおり）。
+// 全件を一度だけ取得し、クライアント側で選択日にfilterする。
+async function loadHistoryOrders(date) {
+  const el = document.getElementById('hist-orders-list');
+  try {
+    if (!ordersFullPromise) {
+      ordersFullPromise = callApi({ type: 'orders', limit: 100 });
+    }
+    const all = await ordersFullPromise;
+    const filtered = all.filter(o => o.date === date);
+    renderOrdersInto('hist-orders-list', filtered);
+  } catch (err) {
+    ordersFullPromise = null;
+    el.innerHTML = '<div class="dim-row">取得失敗: ' + escapeHtml(err.message) + '</div>';
+  }
+}
+
+/* ---- HISTORY mode: view switching ---- */
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.view-today').forEach(el => { el.hidden = mode !== 'today'; });
+  document.querySelectorAll('.view-history').forEach(el => { el.hidden = mode !== 'history'; });
+  document.getElementById('tab-today').classList.toggle('active', mode === 'today');
+  document.getElementById('tab-history').classList.toggle('active', mode === 'history');
+
+  if (mode === 'history') {
+    if (!histDate) initHistoryDate();
+    loadHistoryForDate(histDate);
+  }
+}
+
 /* ---- events ---- */
 document.getElementById('refresh-btn').addEventListener('click', loadDashboard);
 
@@ -347,6 +530,27 @@ document.getElementById('more-toggle').addEventListener('click', () => {
     section.setAttribute('hidden', '');
     icon.innerHTML = '&#9660;';
   }
+});
+
+document.getElementById('tab-today').addEventListener('click', () => setMode('today'));
+document.getElementById('tab-history').addEventListener('click', () => setMode('history'));
+
+document.getElementById('hist-prev').addEventListener('click', () => changeHistDate(addDaysYMD(histDate, -1)));
+document.getElementById('hist-next').addEventListener('click', () => changeHistDate(addDaysYMD(histDate, 1)));
+document.getElementById('hist-today-btn').addEventListener('click', () => changeHistDate(todayYMD()));
+document.getElementById('hist-date-input').addEventListener('change', (e) => {
+  let v = e.target.value;
+  if (!v) return;
+  if (v > todayYMD()) v = todayYMD();
+  changeHistDate(v);
+});
+
+document.getElementById('modal-close-btn').addEventListener('click', closeDeptModal);
+document.getElementById('dept-modal-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'dept-modal-overlay') closeDeptModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeDeptModal();
 });
 
 /* ---- init ---- */

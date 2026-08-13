@@ -20,9 +20,13 @@
       </div>
     </div>
     <div class="subtitle">Investment Command Center</div>
+    <div class="mode-tabs" id="mode-tabs">
+      <button class="mode-tab active" id="tab-today" type="button">TODAY</button>
+      <button class="mode-tab" id="tab-history" type="button">HISTORY</button>
+    </div>
   </div>
 
-  <div class="section dual-col">
+  <div class="section dual-col view-today">
     <div class="col">
       <div class="section-title">FEAR &amp; GREED</div>
       <div class="fg-bar-track"><div class="fg-bar-fill" id="fg-bar-fill"></div></div>
@@ -43,7 +47,7 @@
     </div>
   </div>
 
-  <div class="section">
+  <div class="section view-today">
     <div class="section-title">PORTFOLIO</div>
     <div class="portfolio-grid" id="portfolio-grid">
       <div class="pf-cell">
@@ -65,7 +69,7 @@
     </div>
   </div>
 
-  <div class="section decision-section">
+  <div class="section decision-section view-today">
     <div class="section-title center">FINAL DECISION</div>
     <div class="decision-main">
       <span class="decision-dot" id="decision-dot"></span>
@@ -74,14 +78,15 @@
     <div class="decision-sub" id="decision-sub">-</div>
   </div>
 
-  <div class="section">
+  <div class="section view-today">
     <div class="section-title">DEPARTMENT MEETING</div>
     <div class="dept-grid" id="dept-grid">
       <!-- app.js が動的に生成 -->
     </div>
+    <div class="dept-hint">クリックで詳細</div>
   </div>
 
-  <div class="section">
+  <div class="section view-today">
     <div class="section-title">HOLDINGS</div>
     <div class="holdings-table" id="holdings-table">
       <div class="holdings-header">
@@ -91,21 +96,21 @@
     </div>
   </div>
 
-  <div class="section">
+  <div class="section view-today">
     <div class="section-title">CANDIDATES</div>
     <div class="candidates-list" id="candidates-list">
       <div class="dim-row">loading...</div>
     </div>
   </div>
 
-  <div class="section more-toggle-section">
+  <div class="section more-toggle-section view-today">
     <button class="more-toggle" id="more-toggle" type="button">
       <span id="more-toggle-icon">&#9660;</span>
       <span id="more-toggle-text">ORDERS / HISTORY</span>
     </button>
   </div>
 
-  <div class="section more-section" id="more-section" hidden>
+  <div class="section more-section view-today" id="more-section" hidden>
     <div class="section-title">RECENT ORDERS</div>
     <div class="orders-list" id="orders-list">
       <div class="dim-row">未取得（開くと取得）</div>
@@ -117,11 +122,69 @@
     </div>
   </div>
 
+  <div class="section view-history" hidden>
+    <div class="section-title">DATE</div>
+    <div class="hist-date-row">
+      <button class="hist-nav-btn" id="hist-prev" type="button" aria-label="前の日">&#8592;</button>
+      <input class="hist-date-input" id="hist-date-input" type="date">
+      <button class="hist-nav-btn" id="hist-next" type="button" aria-label="次の日">&#8594;</button>
+      <button class="hist-today-btn" id="hist-today-btn" type="button">TODAY</button>
+    </div>
+    <div class="hist-loading" id="hist-loading" hidden>LOADING...</div>
+    <div class="error-banner" id="hist-error" hidden></div>
+  </div>
+
+  <div class="section decision-section view-history" hidden>
+    <div class="section-title center">FINAL DECISION</div>
+    <div class="decision-main">
+      <span class="decision-dot" id="hist-decision-dot"></span>
+      <span class="decision-label" id="hist-decision-label">--</span>
+    </div>
+    <div class="decision-sub" id="hist-decision-sub">-</div>
+  </div>
+
+  <div class="section view-history" hidden>
+    <div class="section-title">DEPARTMENT MEETING</div>
+    <div class="dept-grid" id="hist-dept-grid"></div>
+    <div class="dept-hint">クリックで詳細</div>
+  </div>
+
+  <div class="section view-history" hidden>
+    <div class="section-title">CANDIDATES</div>
+    <div class="candidates-list" id="hist-candidates-list">
+      <div class="dim-row">--</div>
+    </div>
+  </div>
+
+  <div class="section view-history" hidden>
+    <div class="section-title">ORDERS（該当日）</div>
+    <div class="orders-list" id="hist-orders-list">
+      <div class="dim-row">--</div>
+    </div>
+  </div>
+
   <div class="section footer-section">
     <span class="footer-note">最終更新: <span id="last-updated">--</span></span>
     <button class="refresh-btn" id="refresh-btn" type="button">REFRESH</button>
   </div>
 
+</div>
+
+<div class="modal-overlay" id="dept-modal-overlay" hidden>
+  <div class="modal-box" id="dept-modal-box">
+    <div class="modal-header">
+      <span class="modal-dept-name" id="modal-dept-name">--</span>
+      <button class="modal-close" id="modal-close-btn" type="button" aria-label="閉じる">&times;</button>
+    </div>
+    <div class="modal-role" id="modal-dept-role">--</div>
+    <div class="modal-signal-row">
+      <span class="decision-dot" id="modal-signal-dot"></span>
+      <span class="decision-label" id="modal-signal-label">--</span>
+      <span class="modal-confidence" id="modal-confidence"></span>
+    </div>
+    <div class="modal-comment" id="modal-comment">--</div>
+    <div class="modal-extra" id="modal-extra"></div>
+  </div>
 </div>
 
 <script src="config.js"></script>
