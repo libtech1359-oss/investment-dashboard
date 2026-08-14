@@ -26,6 +26,7 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const scheduler   = require('./scheduler');
 const secretary   = require('./secretary');
 const publisher   = require('./agents/publisher');
+const weekly      = require('./agents/weekly');
 const sheets      = require('./lib/sheets');
 const orderManager = require('./lib/orderManager');
 const health      = require('./lib/health');
@@ -137,6 +138,61 @@ async function handleV2Article(interaction) {
   }
 }
 
+// 対象週（月〜金）を算出する。scheduler.js の currentWeekMondayFriday() と同じロジックだが、
+// weekly.publishWeekly() を直接呼ぶだけの本ハンドラを scheduler.js の内部関数に結合させない
+// ため、意図的に同じ小さなロジックをこちらにも保持する（週刊記事単独再生成専用）。
+function currentWeekMondayFriday() {
+  const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const today    = new Date(`${todayStr}T00:00:00Z`);
+  const dow      = today.getUTCDay();
+  const monday   = new Date(today);
+  monday.setUTCDate(today.getUTCDate() - (dow === 0 ? 6 : dow - 1));
+  const friday   = new Date(monday);
+  friday.setUTCDate(monday.getUTCDate() + 4);
+  const fmt = d => d.toISOString().slice(0, 10);
+  return [fmt(monday), fmt(friday)];
+}
+
+/**
+ * 週刊記事だけを再生成する正式な入口。
+ *
+ * 既に確定した1週間分のデータ（market_data / agent_recommendations /
+ * department_recommendations / final_decisions / orders / portfolio_status /
+ * capital_events）を読み取り専用で集計し直すだけで、weekly.publishWeekly() 以外の
+ * 何も呼び出さない。日次データ取得・投票・売買判断・注文・portfolio_status更新・
+ * capital_events書き込み（Step1〜4・secretary.run・orderManager・signalAggregator・
+ * dataFetcher）は一切実行しない（週刊記事生成ロジック自体がこれらのモジュールを
+ * requireしていないため、構造的に実行不可能）。
+ */
+async function handleV2WeeklyArticle(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const startOpt = interaction.options.getString('開始日');
+  const endOpt   = interaction.options.getString('終了日');
+  const [defaultStart, defaultEnd] = currentWeekMondayFriday();
+  const start = startOpt || defaultStart;
+  const end   = endOpt   || defaultEnd;
+  await interaction.editReply(`⏳ 週刊記事のみ再生成中... (${start}〜${end})\n※Step1〜4（データ取得・投票・発注・portfolio_status更新・capital_events書き込み）は実行しません`);
+
+  try {
+    const result = await weekly.publishWeekly(start, end);
+    const url = result.noteUrl || result.fallbackDraftUrl;
+    const lines = [
+      `**週刊記事再生成完了** ${start}〜${end}`,
+      '',
+      result.approved
+        ? '✅ 公開可（Validator PASS・グラフ2/2・AI編集長APPROVED）'
+        : '⚠️ 要確認・公開見送り（下書きのみ保存）',
+      `グラフ生成 ${result.graphsGenerated ?? 0}/2 枚 ・ 埋め込み ${result.graphsEmbedded ?? 0}/2 枚`,
+      '',
+      url ? `**note下書き**: ${url}` : '（下書き保存に失敗しました）',
+    ].filter(l => l !== undefined);
+
+    await interaction.editReply(lines.join('\n').slice(0, 1900));
+  } catch (err) {
+    await interaction.editReply(`❌ エラー: ${err.message}`);
+  }
+}
+
 async function handleV2Status(interaction) {
   await interaction.deferReply({ flags: 64 });
   try {
@@ -229,11 +285,12 @@ async function handleV2Orders(interaction) {
 
 // ── コマンドテーブル ──────────────────────────────────────
 const SLASH_HANDLERS = {
-  'v2-run':     handleV2Run,
-  'v2-article': handleV2Article,
-  'v2-status':  handleV2Status,
-  'v2-votes':   handleV2Votes,
-  'v2-orders':  handleV2Orders,
+  'v2-run':             handleV2Run,
+  'v2-article':         handleV2Article,
+  'v2-weekly-article':  handleV2WeeklyArticle,
+  'v2-status':          handleV2Status,
+  'v2-votes':           handleV2Votes,
+  'v2-orders':          handleV2Orders,
 };
 
 // ── Discord クライアント ──────────────────────────────────

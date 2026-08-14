@@ -120,15 +120,16 @@ async function executeWeekly(schedule) {
     await notify(`▶ ${schedule.name} 開始`);
     const [start, end] = currentWeekMondayFriday();
     const result = await weekly.publishWeekly(start, end);
-    if (result.noteUrl) {
-      await notify(`📄 **週刊レポート下書き保存完了** (${start}〜${end})\n${result.noteUrl}`);
+    const url = result.noteUrl || result.fallbackDraftUrl;
+    if (url) {
+      await notify(`📄 **週刊レポート下書き保存完了** (${start}〜${end})\n${url}`);
     } else {
       await notify(`⚠️ ${schedule.name}: note.com 下書き保存に失敗しました（本文は生成済み）`);
     }
-    if (result.chartsIncomplete) {
-      await notify(`⚠️ ${schedule.name} 完了（グラフ埋め込み${result.graphsEmbedded}/1枚・要確認）`);
+    if (result.approved) {
+      await notify(`✅ ${schedule.name} 完了（公開可・グラフ${result.graphsEmbedded}/2枚・Validator PASS・AI編集長APPROVED）`);
     } else {
-      await notify(`✅ ${schedule.name} 完了`);
+      await notify(`⚠️ ${schedule.name} 完了（要確認・グラフ生成${result.graphsGenerated}/2枚・埋め込み${result.graphsEmbedded ?? 0}/2枚）`);
     }
   } catch (err) {
     writeError('scheduler', err);

@@ -36,13 +36,16 @@ async function main() {
 
   // データ構造の確認
   const data = await gatherWeeklyData(start, end);
-  console.log('--- 集計サマリー ---');
+  console.log('--- 集計サマリー（lib/weeklyFacts.js による確定値） ---');
   console.log(`営業日数: ${data.period.days}`);
   console.log(`市場データ: ${data.market.length}行`);
-  console.log(`部署投票: ${Object.values(data.votesByDept).flatMap(Object.values).reduce((a, b) => a + b, 0)}件`);
+  console.log(`投資回数: ${data.facts.investCount}回（うちACCUMULATE ${data.facts.accumulateCount}回）`);
+  console.log(`WAIT回数: ${data.facts.waitCount}回`);
+  console.log(`総投資額: ¥${data.facts.totalInvested.toLocaleString()}`);
   console.log(`発注: ${data.orders.length}件`);
   console.log(`ポートフォリオ: ${data.portfolio ? '取得済み' : 'なし'}`);
-  console.log(`ポジション: ${data.positions.length}件`);
+  console.log(`勝者・反省点の選出可否: ${data.facts.winnerLoserEligible ? '可' : `不可（${data.facts.winnerLoserIneligibleReason}）`}`);
+  console.log(`論争候補: ${data.facts.debateCandidate ? data.facts.debateCandidate.date : 'なし'}`);
   console.log('');
 
   // ドラフト生成

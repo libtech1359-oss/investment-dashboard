@@ -19,6 +19,20 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('v2-weekly-article')
+    .setDescription('[v2] 週刊記事のみ再生成（Step1〜4・注文・portfolio_status更新・capital_events書き込みは実行しない）')
+    .addStringOption(opt =>
+      opt.setName('開始日')
+         .setDescription('YYYY-MM-DD（省略で当週月曜）')
+         .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('終了日')
+         .setDescription('YYYY-MM-DD（省略で当週金曜）')
+         .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('v2-status')
     .setDescription('[v2] 最新状態確認: 市場データ・最終判断・直近注文'),
 
