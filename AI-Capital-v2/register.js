@@ -10,6 +10,15 @@ const commands = [
     .setDescription('[v2] パイプライン手動実行: データ→分析→投票→集約→発注→記事'),
 
   new SlashCommandBuilder()
+    .setName('v2-article')
+    .setDescription('[v2] 記事のみ再生成（Step1〜4は実行しない。既に発注済みの日を対象）')
+    .addStringOption(opt =>
+      opt.setName('日付')
+         .setDescription('YYYY-MM-DD（省略で今日）')
+         .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('v2-status')
     .setDescription('[v2] 最新状態確認: 市場データ・最終判断・直近注文'),
 

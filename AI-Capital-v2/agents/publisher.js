@@ -233,6 +233,16 @@ function escapeRegExpPub(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// 免責事項の開始位置を探す（fromIndex以降）。装飾付き `*...*`（初回生成直後）と
+// 装飾なし平文3行版（後処理㉕通過後・品質改善ループ2周目以降）の両方にマッチする。
+// 固定文字列 '\n*AI Capital' のみで検出すると2周目以降にヒットせず、▼CHART▼等の
+// 挿入位置が末尾（既存免責事項のさらに後ろ）にずれる不具合があった（2026-08-14修正）。
+function findDisclaimerIndex(note, fromIndex = 0) {
+  const rest = note.slice(fromIndex);
+  const m = rest.match(/\*?AI Capitalは投資助言サービスではありません/);
+  return m ? fromIndex + m.index : -1;
+}
+
 function findDeptHeader(note, dept) {
   const meta = DEPT_HEADER_META[dept];
   if (!meta) return null;
@@ -384,6 +394,47 @@ function injectRecommendationSummary(note, recs, decision, pf) {
   const insertAt = sectionIdx + sectionLen;
   console.log(`[injectRecommendationSummary] 挿入: sectionIdx=${sectionIdx} len=${sectionLen} block=${block.slice(0,20)}...`);
   return note.slice(0, insertAt) + '\n\n' + block + note.slice(insertAt + 1);
+}
+
+// ── Rule 33 修正用: 実データの橋渡しヒント（2026-08-14追加） ──────────────
+// Rule33（審査部の否定評価と結論の論理橋渡し不足）の再生成では、警告メッセージだけでは
+// LLMが「何を根拠に橋渡し文を書けばよいか」が曖昧になり、実データと異なる理由を
+// 創作したり、橋渡しを付け足せずに終わることがある。ここで各部署の実際の推奨内容
+// （銘柄・金額・見送りの別）と最終判断を機械的に列挙し、「この事実のみを根拠にせよ」と
+// 明示することで、LLMに推測・創作させず実データに基づいた橋渡しを書かせる。
+const RULE33_DEPT_NAMES = {
+  'マーケット分析部':     '神谷シン',
+  'リスク管理部':         '黒崎ミサキ',
+  'ポートフォリオ管理部': '橘アオイ',
+  '審査部':               '鬼塚ガイ',
+};
+
+function buildRule33DataHint(recs, decision) {
+  const lines = (recs ?? []).map(r => {
+    const name   = RULE33_DEPT_NAMES[r.department] || r.department;
+    const asset  = r.asset_name || 'なし';
+    const amt    = parseInt(r.amount || r.recommended_amount || 0);
+    const action = (r.recommendation_type || r.action || 'WAIT').toUpperCase();
+    const desc = (['BUY', 'ACCUMULATE'].includes(action) && asset !== 'なし' && amt > 0)
+      ? `${asset} ¥${amt.toLocaleString()}を推奨`
+      : '見送りを推奨';
+    return `・${name}（${r.department}）: ${desc}`;
+  });
+
+  const finalLine = decision
+    ? `・最終判断: ${decision.target_asset || 'なし'}` +
+      (parseInt(decision.amount || 0) > 0 ? ` ¥${parseInt(decision.amount).toLocaleString()}` : '') +
+      '（採用）'
+    : null;
+
+  return (
+    '【Rule33修正のための実データ（推測・創作禁止。この事実のみを根拠に橋渡しの一文を書くこと）】\n' +
+    lines.join('\n') + (finalLine ? `\n${finalLine}` : '') + '\n' +
+    '上記の実データのみを根拠に、否定的に評価した部署の主張と、実際に支持した結論（判断：欄のラベル）との' +
+    '間の橋渡しを一文で明示すること。「ただし」「それでも」「一方で」等の接続語を使い、なぜ他部署の提案' +
+    'ではなくこの結論を支持するのかを、上記の実際の推奨内容（銘柄・金額・見送り）にのみ基づいて説明する' +
+    'こと。上記に記載のない理由・数値を創作してはならない。'
+  );
 }
 
 // ── 記事冒頭 結論ブロック生成 ────────────────────────────────
@@ -819,7 +870,11 @@ function applyPostProcessing(rawNote, ctx) {
   {
     const reiIdx = findHeading(note, /#{0,2}\s*👑\s*秘書室長所見/);
     if (reiIdx >= 0) {
-      const disclaimerIdx = note.indexOf('\n*AI Capital', reiIdx + 1);
+      // 免責事項は初回生成時は `*...*` 装飾付き、後処理㉕通過後（品質改善ループの2周目以降）は
+      // 装飾なしの平文3行版になる。'\n*AI Capital' 固定文字列だけでは2周目以降にマッチせず、
+      // ▼CHART▼がnote末尾（既存免責事項のさらに後ろ）へ誤挿入されてしまっていた
+      // （2026-08-14判明・修正。findDisclaimerIndexは下のensureMarkersPresentとも共通化）。
+      const disclaimerIdx = findDisclaimerIndex(note, reiIdx + 1);
       const nextMajor     = findHeading(note, MAJOR_SECTION_RE, reiIdx + 1);
       let pos;
       if (disclaimerIdx >= 0)   pos = disclaimerIdx;
@@ -884,6 +939,14 @@ function applyPostProcessing(rawNote, ctx) {
   }
 
   // 後処理⑨a: 📊 Market Check ブロックを 📋 番号直後に機械挿入
+  // 挿入前に既存ブロックを必ず除去する（▼HISTORY▼/▼CHART▼と同じ「既存除去→1回だけ再挿入」に統一）。
+  // 品質改善ループはLLMに「前回の記事全文（＝Market Checkブロック挿入済み）を維持しつつ修正」と
+  // 指示するため、LLMがこのブロックをそのまま複製することがあり、除去せず挿入すると
+  // 「📊 AI Capital Market Check」が2回出現するRule28違反になっていた（2026-08-14判明・修正）。
+  {
+    const marketCheckRe = /#{0,2}\s*📊\s*AI Capital Market Check[\s\S]*?(?=\n#{0,2}\s*(?:📌|🌍|🎯|🏢|⚖️|🔴|💰|👀|👑)|$)/g;
+    note = note.replace(marketCheckRe, '').replace(/\n{3,}/g, '\n\n');
+  }
   if (mkt && note.includes('📋')) {
     const checkBlock = buildMarketCheckBlock(mkt);
     note = note.replace(/(📋 [^\n]+\n)/, `$1\n${checkBlock}\n`);
@@ -1209,14 +1272,25 @@ async function publish(date) {
 
     // ② 機械修正で解決しない警告（内容・論理・部署整合性等）のみLLM再生成（最後の手段）
     console.log(`[publisher] LLM再生成 ${attempt}/${MAX_QUALITY_ATTEMPTS}回目（残り警告${validation.warnings.length}件）`);
+    const hasRule33 = validation.warnings.some(w => /Rule 33/.test(w));
     const repairPrompt =
       `${context}\n\n` +
       '【前回生成した記事で以下の問題が検出されました。記事全体の内容・文体は維持しつつ、指摘箇所のみを修正して記事全文を出力してください】\n' +
       validation.warnings.join('\n\n') +
+      (hasRule33 ? `\n\n${buildRule33DataHint(recs, decisions[0] ?? null)}` : '') +
       `\n\n【前回生成した記事全文（この内容をベースに指摘箇所のみ修正すること）】\n${note}`;
-    note = await generateArticle(repairPrompt);
-    regenerationCount++;
-    validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
+
+    // Ollamaタイムアウト・ネットワーク障害等で再生成そのものが失敗した場合、
+    // 処理全体を破棄せず直前の有効な記事版を保持してループを抜け、通常の
+    // フォールバック（下書き保存・要確認）経路へ進む（2026-08-14追加）。
+    try {
+      note = await generateArticle(repairPrompt);
+      regenerationCount++;
+      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
+    } catch (err) {
+      console.warn(`[publisher] LLM再生成 ${attempt}回目が失敗（${err.message}）→ 直前の記事版を保持してループを終了します`);
+      break;
+    }
   }
 
   // ── AI編集長による最終救済（品質改善ループを尽くしてもNGの場合の最後の1回） ──
@@ -1224,11 +1298,13 @@ async function publish(date) {
   // 修正する指示に留める（記事内容・部署コメント・数値・画像は変更しない）。
   if (!validation.ok) {
     console.warn(`[publisher] ${MAX_QUALITY_ATTEMPTS}回の品質改善サイクルを経ても警告が残っています（機械修正${mechanicalFixCount}回・LLM再生成${regenerationCount}回）。AI編集長による最終修正を試みます`);
+    const hasRule33Rescue = validation.warnings.some(w => /Rule 33/.test(w));
     const editorRescuePrompt =
       `${context}\n\n` +
       'あなたはAI Capitalの編集長です。以下の記事は品質チェックで指摘された問題が複数回の自動修正でも解消していません。' +
       '記事全体の内容・文体・部署コメント・数値は変更せず、指摘箇所のみを慎重に修正して記事全文を出力してください。\n\n' +
       validation.warnings.join('\n\n') +
+      (hasRule33Rescue ? `\n\n${buildRule33DataHint(recs, decisions[0] ?? null)}` : '') +
       `\n\n【前回生成した記事全文（この内容をベースに指摘箇所のみ修正すること）】\n${note}`;
     try {
       note = await generateArticle(editorRescuePrompt);
@@ -1280,9 +1356,25 @@ async function publish(date) {
   const graphsGenerated = [chartPath, historyChartPath].filter(Boolean).length;
   console.log(`[publisher] Graphs Generated : ${graphsGenerated} / 2`);
 
+  // ▼HISTORY▼/▼CHART▼ が本文に存在するかの最終防衛ライン（saveDraft呼び出し全経路で必須）。
+  // 以前は検証PASSした成功経路（チェック②）にしか無く、Validator FAILでsaveFallbackDraft()を
+  // 経由するケースではこの保険が素通りされ、noteDraft.js側で「no-marker」となり画像が
+  // 埋め込まれない不具合が発生していた（2026-08-14判明・修正）。
+  function ensureMarkersPresent() {
+    for (const marker of ['▼HISTORY▼', '▼CHART▼']) {
+      if (!note.includes(marker)) {
+        console.warn(`[publisher] ${marker} が本文に存在しないため末尾に保険挿入します`);
+        const disclaimerIdx = findDisclaimerIndex(note);
+        const pos = disclaimerIdx >= 0 ? disclaimerIdx : note.length;
+        note = note.slice(0, pos) + `\n\n${marker}\n` + note.slice(pos);
+      }
+    }
+  }
+
   // ── 公開停止時でも「修正版Draft」だけは必ず保存する（ゼロ件終了の禁止） ──
   // note.com下書きとして保存するのみで、実際の公開（下書き→公開ボタン）は行わない。
   async function saveFallbackDraft(reason) {
+    ensureMarkersPresent();
     try {
       const result = await saveDraft({ body: note, chartPath, historyChartPath, thumbPath });
       console.log(`[publisher] 修正版Draftをnote下書きに保存しました（${reason}）: ${result.url}`);
@@ -1466,14 +1558,7 @@ async function publish(date) {
   // ── チェック②: 本文内にマーカーが両方存在するか（見出し検出に依存しない最終防衛ライン） ──
   // applyPostProcessing()内の見出し検出（💰/👑）が何らかの理由で失敗しても、ここで必ず
   // マーカーを本文へ追記することで、noteDraft.jsの画像挿入が「no-marker」で失敗しないようにする。
-  for (const marker of ['▼HISTORY▼', '▼CHART▼']) {
-    if (!note.includes(marker)) {
-      console.warn(`[publisher] ${marker} が本文に存在しないため末尾に保険挿入します`);
-      const disclaimerIdx = note.indexOf('\n*AI Capital');
-      const pos = disclaimerIdx >= 0 ? disclaimerIdx : note.length;
-      note = note.slice(0, pos) + `\n\n${marker}\n` + note.slice(pos);
-    }
-  }
+  ensureMarkersPresent();
 
   // note.com へ下書き保存（先に保存してURLを取得）
   let noteUrl = null;
@@ -1514,11 +1599,18 @@ async function publish(date) {
   x = x.replace(/^パターン[A-Cａ-ｃ][\s\S]*?\n\n?/, '');
   console.log(`[publisher] X投稿文生成完了 (${x.length}字)`);
 
+  // グラフ埋め込みが2/2に満たない場合は、Validator FAIL等の他の失敗経路と同じ重みで
+  // 「公開停止・要確認」として扱う（chartsIncompleteだけでは警告表示に留まっていたため
+  // 2026-08-14に明示化。noteUrl自体は人間が手動で直すためのリンクとして返す）。
   return {
     note, x, date, noteUrl,
+    validationFailed: graphsEmbedded < 2,
     chartsIncomplete: graphsEmbedded < 2,
     graphsGenerated, graphsEmbedded,
   };
 }
 
-module.exports = { publish, buildContext, applyPostProcessing, injectRecommendations, injectRecommendationSummary };
+module.exports = {
+  publish, buildContext, applyPostProcessing, injectRecommendations, injectRecommendationSummary,
+  buildRule33DataHint,
+};

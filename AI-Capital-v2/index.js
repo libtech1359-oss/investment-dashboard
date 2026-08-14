@@ -25,12 +25,37 @@ const PID_FILE = path.join(__dirname, '.pid');
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const scheduler   = require('./scheduler');
 const secretary   = require('./secretary');
+const publisher   = require('./agents/publisher');
 const sheets      = require('./lib/sheets');
 const orderManager = require('./lib/orderManager');
 const health      = require('./lib/health');
 
 const { DISCORD_TOKEN, CEO_CHANNEL = 'ai-v2秘書' } = process.env;
 if (!DISCORD_TOKEN) { console.error('❌ DISCORD_TOKEN 未設定'); process.exit(1); }
+
+// ── stale heartbeat リセット（起動時のみ・条件付き） ──────────────
+// 2026-08-14: pm2再起動やクラッシュでプロセスが中断すると、finally節を通らないため
+// health_heartbeat.json の pipelineRunning:true が永久に残り、watchdogが「実際は動いて
+// いないパイプライン」を延々とハング扱いする誤検知が発生した。
+// ただし単純に毎回falseへ上書きするのは危険（万一プロセスが瞬断・即再起動され、実際に
+// 前のインスタンスがまだ稼働中のheartbeatを誤って消してしまうケースを避けるため）。
+// 上の多重起動防止チェックにより、この時点で「同名アプリの生きたプロセスは自分だけ」が
+// 保証されているため、heartbeat.pid が自分の process.pid と異なる場合は
+// 100%別インスタンス（既に死んでいる）のものと判定できる。
+(function reconcileStaleHeartbeat() {
+  const hb = health.readHeartbeat();
+  if (!hb || !hb.pipelineRunning) return;
+
+  if (health.isHeartbeatStale(hb, process.pid)) {
+    console.warn(
+      `[startup] stale heartbeat検出（pid: ${hb.pid ?? '不明'} / 現在pid: ${process.pid} / ` +
+      `pipelineStartedAt: ${hb.pipelineStartedAt ?? '不明'}）→ pipelineRunning をリセットします`
+    );
+    health.writeHeartbeat({ pipelineRunning: false, pipelineTask: null, pipelineStartedAt: null });
+  } else {
+    console.log('[startup] heartbeatは現在のプロセスの実行中状態と一致しているためリセットしません');
+  }
+})();
 
 console.log(`
 ╔══════════════════════════════════════════╗
@@ -72,6 +97,38 @@ async function handleV2Run(interaction) {
       '',
       result.article?.noteUrl ? `**note下書き**: ${result.article.noteUrl}` : '',
       result.article ? `**X投稿候補**:\n${result.article.x}` : '',
+    ].filter(l => l !== undefined);
+
+    await interaction.editReply(lines.join('\n').slice(0, 1900));
+  } catch (err) {
+    await interaction.editReply(`❌ エラー: ${err.message}`);
+  }
+}
+
+// 記事のみ再生成（Step1〜4は一切呼ばない）。
+// publisher.publish(date) は final_decisions/agent_recommendations/orders 等を
+// Sheetsから読み取るだけの自己完結関数のため、データ取得・投票・発注（Step1〜4）を
+// 再実行するリスクなしに、既に完了済みの日の記事だけを安全に再生成できる。
+// 2026-08-14: 手動スクリプトでの応急対応に代わる恒久コマンドとして追加。
+async function handleV2Article(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const dateOpt = interaction.options.getString('日付');
+  const date    = dateOpt || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  await interaction.editReply(`⏳ 記事のみ再生成中... (${date})\n※Step1〜4（データ取得・投票・発注）は実行しません`);
+
+  try {
+    const article = await publisher.publish(date);
+    const lines = [
+      `**記事再生成完了** ${date}`,
+      '',
+      article.validationFailed
+        ? '⚠️ 整合性チェック未通過・要確認（下書きのみ保存、公開は見送り）'
+        : '✅ Validator PASS',
+      article.chartsIncomplete ? `⚠️ グラフ埋め込み ${article.graphsEmbedded ?? 0}/2 枚（要確認）` : '',
+      '',
+      article.noteUrl ? `**note下書き**: ${article.noteUrl}` : '',
+      article.fallbackDraftUrl ? `**note下書き（フォールバック）**: ${article.fallbackDraftUrl}` : '',
+      article.x ? `**X投稿候補**:\n${article.x}` : '',
     ].filter(l => l !== undefined);
 
     await interaction.editReply(lines.join('\n').slice(0, 1900));
@@ -172,10 +229,11 @@ async function handleV2Orders(interaction) {
 
 // ── コマンドテーブル ──────────────────────────────────────
 const SLASH_HANDLERS = {
-  'v2-run':    handleV2Run,
-  'v2-status': handleV2Status,
-  'v2-votes':  handleV2Votes,
-  'v2-orders': handleV2Orders,
+  'v2-run':     handleV2Run,
+  'v2-article': handleV2Article,
+  'v2-status':  handleV2Status,
+  'v2-votes':   handleV2Votes,
+  'v2-orders':  handleV2Orders,
 };
 
 // ── Discord クライアント ──────────────────────────────────

@@ -11,10 +11,55 @@ function gasUrl() {
   return url;
 }
 
+// ── サーキットブレーカー（2026-08-14追加） ──────────────────────
+// 個々の呼び出しのtimeout/retryはこのブレーカーの対象外・現状のまま変更しない。
+// このブレーカーは「ネットワーク自体が落ちている」連続失敗（fetch例外＝AbortError/
+// DNS失敗/接続不能等）だけをカウントし、HTTPステータスエラー（往復は成功している）は
+// カウントしない。連続失敗が閾値に達したら、以降の呼び出しはtimeout/retryを一切試みず
+// 即座に失敗させ、クールダウン明けに自動復帰する。DNS障害時に多数のcall siteがそれぞれ
+// フルのtimeout+retryコストを払って累積時間が膨れ上がるのを防ぐ（2026-08-14の
+// パイプライン長時間化インシデントを受けて追加）。
+const CIRCUIT_FAILURE_THRESHOLD = 3;
+const CIRCUIT_COOLDOWN_MS       = 60 * 1000;
+let consecutiveFailures = 0;
+let circuitOpenUntil    = 0;
+
+function circuitBreakerGuard() {
+  if (Date.now() < circuitOpenUntil) {
+    const remainingSec = Math.ceil((circuitOpenUntil - Date.now()) / 1000);
+    throw new Error(
+      `[sheets] サーキットブレーカー作動中（連続${consecutiveFailures}回のネットワーク失敗のため、` +
+      `あと${remainingSec}秒はクールダウン中・呼び出しを即時スキップ）`
+    );
+  }
+}
+
+function recordSheetsSuccess() {
+  consecutiveFailures = 0;
+}
+
+function recordSheetsFailure() {
+  consecutiveFailures++;
+  if (consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && Date.now() >= circuitOpenUntil) {
+    circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+    console.warn(
+      `[sheets] サーキットブレーカー作動: 連続${consecutiveFailures}回のネットワーク失敗 → ` +
+      `${CIRCUIT_COOLDOWN_MS / 1000}秒間クールダウン`
+    );
+  }
+}
+
+// テスト用: ブレーカー状態を初期化する
+function _resetCircuitBreaker() {
+  consecutiveFailures = 0;
+  circuitOpenUntil = 0;
+}
+
 // GAS Web App はコールドスタート等で稀にタイムアウト/404を返すため、1回だけ自動リトライする。
 // 2026-07-08 の signalAggregator失敗（Step 3: "This operation was aborted"）・
 // 審査部エラー（GAS POST HTTP 404）はこのタイムアウトが原因だった。
 async function fetchT(url, opts = {}, ms = 30000, retries = 1) {
+  circuitBreakerGuard();
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
@@ -22,6 +67,7 @@ async function fetchT(url, opts = {}, ms = 30000, retries = 1) {
     try {
       const res = await fetch(url, { ...opts, signal: ctrl.signal });
       clearTimeout(tid);
+      recordSheetsSuccess();
       if (!res.ok && attempt < retries) {
         console.warn(`[sheets] HTTP ${res.status} → ${attempt + 1}/${retries}回目のリトライ`);
         await new Promise(r => setTimeout(r, 1000));
@@ -36,6 +82,7 @@ async function fetchT(url, opts = {}, ms = 30000, retries = 1) {
         await new Promise(r => setTimeout(r, 1000));
         continue;
       }
+      recordSheetsFailure();
       throw err;
     }
   }
@@ -123,4 +170,8 @@ async function clearSheet(sheetName) {
   return post({ action: 'clear_sheet', sheet: sheetName });
 }
 
-module.exports = { getRows, getRowsByDate, getRowsByDateRange, getLatestRow, getLatestRowAsOf, appendRow, upsertRow, replaceSheet, clearSheet, post };
+module.exports = {
+  getRows, getRowsByDate, getRowsByDateRange, getLatestRow, getLatestRowAsOf,
+  appendRow, upsertRow, replaceSheet, clearSheet, post,
+  _resetCircuitBreaker, CIRCUIT_FAILURE_THRESHOLD, CIRCUIT_COOLDOWN_MS,
+};

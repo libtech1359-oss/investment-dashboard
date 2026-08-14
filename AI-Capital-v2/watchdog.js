@@ -22,7 +22,11 @@ const sheets = require('./lib/sheets');
 const TARGET_APP        = 'ai-v2-secretary';
 const TICK_CRON         = '*/5 * * * *';
 const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;   // ハートビートが10分以内なら生存とみなす
-const PIPELINE_STUCK_MS  = 20 * 60 * 1000;   // パイプラインが20分以上running状態ならハング疑い
+// パイプラインが90分以上running状態ならハング疑い（CPU推論のみのため品質改善ループ込みで
+// 長時間かかる。2026-08-13の誤検知を受け20分→45分に引き上げたが、2026-08-14に記事生成のみの
+// 正常実行が約46分かかることを実測したため、45分でも正常系を誤検知しうると判断し90分へ再度引き上げ）。
+const PIPELINE_STUCK_MS  = 90 * 60 * 1000;
+const DISCORD_FETCH_TIMEOUT_MS = 10 * 1000;  // DNS/接続障害時に無期限で待たない（2026-08-14追加）
 const HEALTHY_LOG_INTERVAL_MS = 30 * 60 * 1000; // 健全時は30分に1回だけ記録
 
 const { DISCORD_TOKEN, GUILD_ID, CEO_CHANNEL = 'ai-v2秘書' } = process.env;
@@ -42,12 +46,12 @@ function writeState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-// ── PM2プロセス状態取得 ────────────────────────────────────
-async function getPm2Status(appName) {
+// ── PM2プロセス状態取得（status + pid。pidはstale heartbeat判定に使う） ─────
+async function getPm2Info(appName) {
   const { stdout } = await exec('pm2 jlist');
   const list = JSON.parse(stdout);
   const proc = list.find(p => p.name === appName);
-  return proc ? proc.pm2_env.status : 'not_found';
+  return proc ? { status: proc.pm2_env.status, pid: proc.pid } : { status: 'not_found', pid: null };
 }
 
 // ── 総合ヘルスチェック ─────────────────────────────────────
@@ -56,29 +60,46 @@ async function checkHealth() {
   const now = Date.now();
 
   let pm2Status = 'unknown';
+  let pm2Pid    = null;
   try {
-    pm2Status = await getPm2Status(TARGET_APP);
+    const info = await getPm2Info(TARGET_APP);
+    pm2Status = info.status;
+    pm2Pid    = info.pid;
   } catch (err) {
     reasons.push(`pm2 jlist 失敗: ${err.message}`);
   }
   if (pm2Status !== 'online') reasons.push(`PM2ステータス異常: ${pm2Status}`);
 
   const hb = health.readHeartbeat();
+  let staleHeartbeat = false;
   if (!hb) {
     reasons.push('ハートビートファイルが存在しない');
   } else {
     const age = now - new Date(hb.updatedAt).getTime();
     if (age > HEARTBEAT_FRESH_MS) reasons.push(`ハートビート更新が古い（${Math.round(age / 60000)}分前）`);
     if (hb.discordStatus !== 'connected') reasons.push(`Discord接続状態: ${hb.discordStatus}`);
+
     if (hb.pipelineRunning && hb.pipelineStartedAt) {
-      const runMs = now - new Date(hb.pipelineStartedAt).getTime();
-      if (runMs > PIPELINE_STUCK_MS) {
-        reasons.push(`パイプライン "${hb.pipelineTask}" が${Math.round(runMs / 60000)}分間実行中（ハング疑い）`);
+      // heartbeat.pid が実際にpm2が管理する現在のプロセスpidと異なる場合、その
+      // pipelineRunning:true は既に死んだ前インスタンスの残留データ（stale）であり、
+      // pipelineStartedAt からの経過時間で「ハング」と判定するのは誤検知になる。
+      // 「プロセスは稼働中(pm2Status=online)」と「pipelineが実際に実行中」を区別する。
+      if (pm2Pid && hb.pid && hb.pid !== pm2Pid) {
+        staleHeartbeat = true;
+        console.warn(
+          `[watchdog] STALE_HEARTBEAT: heartbeat.pid=${hb.pid} が実PM2 pid=${pm2Pid} と不一致 ` +
+          `（プロセス再起動後の残留データ・ハングではない）`
+        );
+      } else {
+        const runMs = now - new Date(hb.pipelineStartedAt).getTime();
+        if (runMs > PIPELINE_STUCK_MS) {
+          reasons.push(`パイプライン "${hb.pipelineTask}" が${Math.round(runMs / 60000)}分間実行中（ハング疑い）`);
+        }
       }
     }
   }
 
-  return { healthy: reasons.length === 0, reasons, pm2Status, heartbeat: hb };
+  return { healthy: reasons.length === 0, reasons, pm2Status, heartbeat: hb, staleHeartbeat };
 }
 
 // ── Discord通知（REST直叩き・gatewayログイン不要） ────────────
@@ -86,9 +107,22 @@ async function checkHealth() {
 // 既存のDISCORD_TOKENでREST APIを直接叩く。
 let cachedChannelId = null;
 
+// DNS障害・接続不能時に無期限で待たないよう、素のfetch()にAbortControllerで
+// 明示的なタイムアウトを設定する（2026-08-14: watchdog自身のDiscord通知が
+// タイムアウトなしで無期限に待ちうる箇所として発見・修正）。
+async function fetchWithTimeout(url, opts = {}, ms = DISCORD_FETCH_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
 async function resolveChannelId() {
   if (cachedChannelId) return cachedChannelId;
-  const res = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/channels`, {
+  const res = await fetchWithTimeout(`https://discord.com/api/v10/guilds/${GUILD_ID}/channels`, {
     headers: { Authorization: `Bot ${DISCORD_TOKEN}` },
   });
   if (!res.ok) throw new Error(`Discord channels API HTTP ${res.status}`);
@@ -102,7 +136,7 @@ async function resolveChannelId() {
 async function notifyDiscord(content) {
   try {
     const channelId = await resolveChannelId();
-    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+    const res = await fetchWithTimeout(`https://discord.com/api/v10/channels/${channelId}/messages`, {
       method:  'POST',
       headers: { Authorization: `Bot ${DISCORD_TOKEN}`, 'Content-Type': 'application/json' },
       body:    JSON.stringify({ content }),
@@ -223,4 +257,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { checkHealth, handleUnhealthy, tick, readState, writeState, notifyDiscord, logHealth };
+module.exports = {
+  checkHealth, handleUnhealthy, tick, readState, writeState, notifyDiscord, logHealth,
+  getPm2Info, fetchWithTimeout, PIPELINE_STUCK_MS,
+};
