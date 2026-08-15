@@ -2818,6 +2818,65 @@ function NisaStrategyEngineD(testOverrides) {
   };
 }
 
+// ══════════════════════════════════════════════════════════
+// Phase6 表示UI（2026-08-15追加）
+// 「毎年Apps Scriptエディタでテスト関数を実行する」運用をやめ、
+// スプレッドシートを開いてメニューから数クリックで翌年NISA判断を読めるようにする。
+// NisaStrategyEngineD()の計算ロジック・plainTextSummaryの内容は一切変更しない
+// （そのままシートに書き写すだけ）。書き込み先は下記NISA_PLAN_DISPLAY_SHEET_NAME
+// の専用シートのみで、他の本番シート（資金ルール/目標配分/取引履歴/日次記録等）
+// には一切触れない。
+// ══════════════════════════════════════════════════════════
+
+const NISA_PLAN_DISPLAY_SHEET_NAME = 'NISA判断';
+
+// 実運用専用の呼び出し関数。NisaStrategyEngineD()を実行し、その戻り値の
+// plainTextSummaryを改変せずに「NISA判断」シートへ書き込む（改行単位でA列に1行ずつ）。
+// 既存シートがあればその内容だけをclearContents()してから上書きし、
+// 過去履歴は保存しない（2026-08-15仕様通り）。
+function showNisaPlan() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(NISA_PLAN_DISPLAY_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(NISA_PLAN_DISPLAY_SHEET_NAME);
+  } else {
+    sheet.clearContents();
+  }
+
+  const result = NisaStrategyEngineD();
+  const lines = String(result.plainTextSummary || '').split('\n');
+  sheet.getRange(1, 1, lines.length, 1).setValues(lines.map(function (line) { return [line]; }));
+
+  ss.setActiveSheet(sheet);
+}
+
+// カスタムメニュー生成。スタンドアロンスクリプトのため単純トリガーとしては発火せず、
+// setupNisaMenuTrigger()でインストール型トリガーとして登録して初めて
+// スプレッドシートを開いた際に自動実行される。
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('NISA判断')
+    .addItem('翌年NISA判断を見る', 'showNisaPlan')
+    .addToUi();
+}
+
+// 初回のみ手動実行する一度きりのセットアップ関数。onOpen()をインストール型トリガーとして
+// 登録する（DailyNAV_fetcher.gsのsetupTrigger()と同じ「同名ハンドラの既存トリガーを
+// 削除してから再作成」という安全パターンを踏襲。フィルタ対象はハンドラ関数名'onOpen'の
+// みのため、fetchDailyNAV用の既存トリガーには一切影響しない）。
+function setupNisaMenuTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'onOpen'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+
+  ScriptApp.newTrigger('onOpen')
+    .forSpreadsheet(SpreadsheetApp.openById(SPREADSHEET_ID))
+    .onOpen()
+    .create();
+
+  Logger.log('✅ 「NISA判断」メニュー用のonOpenトリガーを登録しました（次回以降スプレッドシートを開くとメニューが表示されます）');
+}
+
 // ── テスト関数群（Phase6）。本番のCURRENT_CASH・取引履歴等は一切変更しない ──
 
 // TEST P6-4: 売却時の税額計算が正しいか（既知の数値で検算、構造変更の影響を受けないため維持）
