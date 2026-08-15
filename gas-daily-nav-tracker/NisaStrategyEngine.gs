@@ -2206,3 +2206,758 @@ function testPhase5D_HardRuleUnchanged() {
   const resultBelow = NisaStrategyEngineC({ engineAOverrides: { cashRules: cashRulesBelow } });
   Logger.log('■ TEST 3-b（currentCash<protectedCashMin）: status=' + resultBelow.status + ' (期待値: BLOCKED)');
 }
+
+// ══════════════════════════════════════════════════════════
+// Phase6: 翌年NISA枠360万円の資金計画エンジン
+// （特定口座売却 vs 新規資金DCA vs 組み合わせ、銘柄単位の売却候補提示）
+// ══════════════════════════════════════════════════════════
+// 2026-08-14 承認済み仕様に基づく実装。
+//
+// 目的: 「翌年の新NISA年間投資枠360万円をどう使うのが合理的か」の判断材料を提示する。
+// 「NISA枠を埋めること」自体を目的化しない。実際の売買・発注は一切行わない。
+//
+// 【既存Phase1〜5への影響】: 一切なし。Phase4A/Bの拡張ポイント（testOverridesの
+// cashRules差し替え）のみを使い、既存の計算式・閾値・出力は変更していない。
+// fundingSource（CASH_ONLY / CASH_PLUS_TOKUTEI_SALE）という新しい軸をPhase6側で
+// 追加し、Phase4Bを異なる入力（currentCashの値）で複数回呼び出すことで比較する。
+//
+// 【銘柄粒度について】: 本システムでは「カテゴリ」＝「銘柄（投資信託商品）」が1:1
+// である（オルカン=eMAXIS Slim全世界株式、等、それぞれ単一の投資信託商品）。
+// 個別株式・購入ロット単位の情報は投資信託の性質上そもそも存在せず、
+// fetchDashboardFunds_()が返す粒度が最も細かい単位。getTokuteiHoldings()の
+// 出力はそのままカテゴリ単位=銘柄単位として扱える。
+
+const CAPITAL_GAINS_TAX_RATE = 0.20315; // 譲渡税率（新規定義、あくまで簡易試算用）
+
+// 特定口座（account==='特定'）のみを抽出したカテゴリ別（=銘柄別）保有データ。
+// getCurrentAllocation()は変更せず、独立した新規関数として追加。
+function getTokuteiHoldings() {
+  const calculatedAt = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+  const funds = fetchDashboardFunds_();
+  if (!funds) {
+    return { calculatedAt, totalValue: null, byFund: [], dataQuality: 'UNAVAILABLE', warnings: ['投資管理ダッシュボードの実資産データを取得できませんでした'] };
+  }
+
+  const tokuteiFunds = funds.filter(f => String(f.account || '').trim() === '特定');
+  let totalValue = 0;
+  const byFund = tokuteiFunds.map(f => {
+    const value = Number(f.value) || 0;
+    const principal = Number(f.principal) || 0;
+    const gain = value - principal;
+    totalValue += value;
+    return {
+      category: String(f.name || '').trim(),
+      fundName: String(f.name || '').trim(), // 本システムでは category と同一（1カテゴリ=1銘柄のため）
+      value: value,
+      principal: principal,
+      gain: gain,
+      gainPct: principal > 0 ? Math.round((gain / principal) * 10000) / 100 : 0,
+    };
+  });
+
+  return { calculatedAt, totalValue, byFund, dataQuality: 'OK', warnings: [] };
+}
+
+// 部分売却時の推定譲渡税額（簡易試算）。
+// 損益通算・確定申告の完全再現は行わない。あくまで銘柄単位の概算比較が目的。
+function estimateCapitalGainsTax_(sellAmount, holdingValue, holdingGain) {
+  const estimatedRealizedGain = holdingValue > 0 ? (sellAmount / holdingValue) * holdingGain : 0;
+  const estimatedTax = Math.round(Math.max(0, estimatedRealizedGain) * CAPITAL_GAINS_TAX_RATE);
+  return {
+    estimatedRealizedGain: Math.round(estimatedRealizedGain),
+    estimatedTax: estimatedTax,
+    netProceeds: Math.round(sellAmount - estimatedTax),
+  };
+}
+
+// 「NISAへ投入する合理性がある金額」を、新しい計算式を発明せず、Phase4Bを
+// 「現金無制限」の参照実行として呼び出すことで求める（Phase4Bの既存ウォーターフィルが
+// 目標配分の不足・NISA適格性・NISA枠残で自然に頭打ちする仕組みをそのまま利用）。
+function getNisaRequiredAmount_(testOverrides) {
+  const opts = testOverrides || {};
+  const realCashRules = opts.cashRules || getCashRules();
+  const unlimitedCashRules = Object.assign({}, realCashRules, { currentCash: realCashRules.protectedCashMin + 999999999 });
+  const refOverrides = Object.assign({}, opts, {
+    cashRules: unlimitedCashRules,
+    engineAOverrides: Object.assign({}, opts.engineAOverrides, { cashRules: unlimitedCashRules }),
+  });
+  const refResult = NisaStrategyEngineB(refOverrides);
+  return refResult.status === 'BLOCKED' ? 0 : refResult.recommendedInvestmentAmount;
+}
+
+// Phase6専用の想定資金設定値。将来ボーナス額・積立額が変わった場合はここだけ変更すればよい。
+// 実際のNISA積立設定・給与収入を変更する処理ではなく、あくまで試算用の入力値。
+// NisaStrategyEngineD()のtestOverridesでbonusAmount/monthlyNisaContributionを渡せば
+// この定数を使わず一時的に差し替えることもできる。
+const NEXT_YEAR_BONUS_AMOUNT = 800000;
+const NEXT_YEAR_MONTHLY_NISA_CONTRIBUTION = 50000;
+
+// NISA新規購入対象をCOREに限定するためのカテゴリリスト（オルカン＋S&P500）。
+// 「NISAで買う対象」を絞るためのものであり、「特定口座の売却候補」を絞るものではない
+// （売却候補は特定口座の全銘柄を対象とする、getSaleCandidates_参照）。
+const CORE_CATEGORIES = ['オルカン', 'S&P500'];
+
+// realEligibility（getCategoryNisaEligibility_()の結果）のうち、CORE_CATEGORIES以外を
+// 全てUNCONFIRMED扱いに差し替えたeligibilityを作る。NisaStrategyEngineB()の既存
+// eligibilityオーバーライドとして渡すことで、Phase4B自体を一切変更せずにNISA新規購入対象を
+// CORE限定できる。
+function buildCoreOnlyEligibility_(realEligibility) {
+  const map = {};
+  Object.keys(realEligibility.map || {}).forEach(cat => {
+    map[cat] = CORE_CATEGORIES.indexOf(cat) !== -1
+      ? realEligibility.map[cat]
+      : { growthEligible: false, tsumitateEligible: false };
+  });
+  return { map: map, dataQuality: realEligibility.dataQuality };
+}
+
+// 現在のCORE(オルカン+S&P500)評価額・総資産評価額・CORE比率と、コア評価額/総資産評価額に
+// それぞれcoreValueDelta/totalValueDeltaを加えた場合の「投資後」比率を返す。
+// 「CORE比率が高いほど良い」という価値判断はここでは行わず、単純な比率計算のみ。
+function getCoreRatio_(currentAllocation, coreValueDelta, totalValueDelta) {
+  coreValueDelta = coreValueDelta || 0;
+  totalValueDelta = totalValueDelta != null ? totalValueDelta : coreValueDelta;
+  const coreValue = (currentAllocation.byCategory || [])
+    .filter(c => CORE_CATEGORIES.indexOf(c.category) !== -1)
+    .reduce((s, c) => s + c.value, 0);
+  const totalValue = currentAllocation.totalValue || 0;
+  const afterCoreValue = coreValue + coreValueDelta;
+  const afterTotalValue = totalValue + totalValueDelta;
+  return {
+    currentCoreValue: coreValue,
+    currentTotalValue: totalValue,
+    currentCoreRatioPct: totalValue > 0 ? Math.round((coreValue / totalValue) * 10000) / 100 : 0,
+    afterCoreValue: Math.round(afterCoreValue),
+    afterTotalValue: Math.round(afterTotalValue),
+    afterCoreRatioPct: afterTotalValue > 0 ? Math.round((afterCoreValue / afterTotalValue) * 10000) / 100 : 0,
+  };
+}
+
+// 特定口座の全銘柄（CORE限定しない）を売却候補として評価する。
+// 「含み益が多い/少ない」の単純基準ではなく、プラス要素(reasonsFor)とマイナス要素
+// (reasonsAgainst)を個別に開示する。ソートは「含み益率が低い順」の参考順のみで、
+// これ単独が判断基準ではないことを呼び出し側でも明記する。
+function getSaleCandidates_(tokuteiHoldings, engineAResult, eligibilityResult) {
+  const engineAByCategory = {};
+  engineAResult.categories.forEach(c => { engineAByCategory[c.category] = c; });
+
+  const candidates = tokuteiHoldings.byFund.map(f => {
+    const a = engineAByCategory[f.category] || {};
+    const elig = eligibilityResult.map[f.category] || { growthEligible: false, tsumitateEligible: false };
+    const nisaEligibility =
+      elig.growthEligible && elig.tsumitateEligible ? 'CONFIRMED_BOTH' :
+      elig.growthEligible ? 'CONFIRMED_GROWTH' :
+      elig.tsumitateEligible ? 'CONFIRMED_TSUMITATE' : 'UNCONFIRMED';
+    const gapOverall = a.gapOverall != null ? a.gapOverall : null;
+    const nisaAbsent = a.nisaAbsent != null ? a.nisaAbsent : null;
+    const nisaWeight = a.nisaWeight != null ? a.nisaWeight : null;
+    const isCoreCategory = CORE_CATEGORIES.indexOf(f.category) !== -1;
+
+    const reasonsFor = [];    // 売却を検討しやすい要素
+    const reasonsAgainst = []; // 売却を避けたい要素
+
+    if (f.gainPct < 15) reasonsFor.push('含み益率が' + f.gainPct + '%と低く、売却時の税負担が比較的小さい');
+    else if (f.gainPct >= 30) reasonsAgainst.push('含み益率が' + f.gainPct + '%と高く、売却時の税負担が比較的大きい');
+    else reasonsFor.push('含み益率は' + f.gainPct + '%で、税負担は中程度の見込み');
+
+    if (gapOverall != null) {
+      if (gapOverall < 0) reasonsFor.push('実資産全体で目標比率を' + Math.abs(gapOverall) + 'pt上回っており、売却してもポートフォリオが目標に近づく方向');
+      else if (gapOverall > 0.3) reasonsAgainst.push('実資産全体で目標比率を' + gapOverall + 'pt下回っており、売却するとさらに乖離が広がる');
+    }
+
+    if (isCoreCategory) {
+      reasonsFor.push('この銘柄はNISA購入対象（CORE）です。特定口座で売却しNISAで買い直すことで、将来の値上がり分を非課税にできます（ただし今回実現する含み益には課税されます）');
+      reasonsAgainst.push('CORE銘柄の特定口座→NISA移し替えは同一カテゴリ内の移動のため、CORE比率自体はほとんど変化しません（税負担の分だけ総資産がわずかに減ります）');
+    } else {
+      reasonsFor.push('この銘柄はNISA追加購入対象ではありません。特定口座に残しても新たな非課税枠は使えないため、売却してCORE購入の原資にする選択肢があります');
+      if (nisaAbsent === false) reasonsFor.push('NISA内でも同カテゴリを保有中（構成比' + nisaWeight + '%）のため、特定口座分を追加で保有し続ける必要性は比較的低いと考えられます');
+    }
+
+    if (nisaEligibility !== 'UNCONFIRMED' && nisaAbsent === false) {
+      reasonsAgainst.push('NISA内で既にこのカテゴリを保有しているため、現状維持でも大きな問題はありません');
+    }
+
+    return {
+      category: f.category,
+      fundName: f.fundName,
+      value: f.value,
+      principal: f.principal,
+      gain: f.gain,
+      gainPct: f.gainPct,
+      currentWeight: a.currentWeight != null ? a.currentWeight : null,
+      targetWeight: a.targetWeight != null ? a.targetWeight : null,
+      gapOverall: gapOverall,
+      nisaWeight: nisaWeight,
+      nisaAbsent: nisaAbsent,
+      nisaEligibility: nisaEligibility,
+      isCoreCategory: isCoreCategory,
+      reasonsFor: reasonsFor,
+      reasonsAgainst: reasonsAgainst,
+    };
+  });
+
+  // 参考ソートのみ（含み益率が低い順）。唯一の判断基準ではないことを呼び出し側で明記する。
+  candidates.sort((x, y) => x.gainPct - y.gainPct);
+  return candidates;
+}
+
+// 売却候補（getSaleCandidates_の並び順＝含み益率の低い順を参考順として使用）を、
+// targetAmount（税引後ベースで必要な金額、0の場合は空プランを返す）を満たすまで
+// 積み上げた仮想売却プランを作る。実際の売却は一切行わない（試算のみ）。
+// 各候補について、売却によるCORE評価額・総資産評価額への影響（coreValueDelta/
+// totalValueDelta）も併せて算出する（CORE銘柄の移し替えはCORE比率にほぼ影響しない、
+// CORE外銘柄の売却→CORE購入はCORE比率を押し上げる、という違いを反映するため）。
+function buildSalePlan_(candidates, targetAmount) {
+  let remaining = targetAmount;
+  const salePlan = [];
+  candidates.forEach(c => {
+    if (remaining <= 0 || c.value <= 0) return;
+    const realizedGainRatio = c.value > 0 ? c.gain / c.value : 0;
+    const denom = 1 - Math.max(0, realizedGainRatio) * CAPITAL_GAINS_TAX_RATE;
+    const idealSell = denom > 0 ? remaining / denom : remaining;
+    const sellAmount = Math.min(c.value, Math.round(idealSell));
+    if (sellAmount <= 0) return;
+    const tax = estimateCapitalGainsTax_(sellAmount, c.value, c.gain);
+    remaining -= tax.netProceeds;
+    const coreValueDelta = tax.netProceeds - (c.isCoreCategory ? sellAmount : 0);
+    salePlan.push({
+      priorityRank: salePlan.length + 1,
+      category: c.category,
+      fundName: c.fundName,
+      currentValue: c.value,
+      principal: c.principal,
+      gain: c.gain,
+      gainPct: c.gainPct,
+      sellAmount: sellAmount,
+      remainingBalance: Math.round(c.value - sellAmount),
+      estimatedRealizedGain: tax.estimatedRealizedGain,
+      estimatedTax: tax.estimatedTax,
+      netProceeds: tax.netProceeds,
+      isCoreCategory: c.isCoreCategory,
+      coreValueDelta: coreValueDelta,
+      totalValueDelta: -tax.estimatedTax,
+      reasonsFor: c.reasonsFor,
+      reasonsAgainst: c.reasonsAgainst,
+    });
+  });
+  return salePlan;
+}
+
+// A/B/Cの各資金計画シナリオを、指定した availableAmount をNISA(CORE限定)へ投入した場合の
+// 試算として計算する。実際のcashRulesは変更せず、「availableAmount分だけ投資可能資金が
+// あったとしたら」という仮想のcashRulesをNisaStrategyEngineB()へ渡すことで実現する
+// （Phase4Bの既存拡張ポイントの利用、Phase4B自体は無改修）。
+// このシナリオ関数はHARD RULEを回避するものではない。呼び出し元(NisaStrategyEngineD)が
+// 実際のcashRulesで先にHARD RULEを判定済みであることが前提。
+function runCoreFundingScenario_(label, description, targetYear, availableAmount, coreOnlyEligibility, currentAllocation, opts) {
+  const realCashRules = opts.cashRules || getCashRules();
+  const hypotheticalCashRules = Object.assign({}, realCashRules, { currentCash: realCashRules.protectedCashMin + Math.max(0, availableAmount) });
+  const scenarioOverrides = Object.assign({}, opts, {
+    targetYear: targetYear,
+    cashRules: hypotheticalCashRules,
+    engineAOverrides: Object.assign({}, opts.engineAOverrides, { cashRules: hypotheticalCashRules }),
+    eligibility: coreOnlyEligibility,
+    // このシナリオの資金はavailableAmountとして既に明示的に指定しているため、
+    // 月別投資額シートの確定入金と二重計上しないようUNKNOWN扱いにする
+    plannedContribution: { year: targetYear, status: 'UNKNOWN', totalAmount: null, months: [], warnings: [] },
+  });
+  const result = NisaStrategyEngineB(scenarioOverrides);
+  const nisaInvestmentAmount = result.status === 'BLOCKED' ? 0 : result.recommendedInvestmentAmount;
+  const coreValueDelta = result.status === 'BLOCKED' ? 0 :
+    (result.categories || []).filter(c => CORE_CATEGORIES.indexOf(c.category) !== -1).reduce((s, c) => s + c.recommendedAmount, 0);
+
+  return {
+    label: label,
+    description: description,
+    availableAmount: Math.max(0, availableAmount),
+    nisaInvestmentAmount: nisaInvestmentAmount,
+    coreValueDelta: coreValueDelta,
+    totalValueDelta: nisaInvestmentAmount,
+    coreRatio: getCoreRatio_(currentAllocation, coreValueDelta, nisaInvestmentAmount),
+    categories: result.status === 'BLOCKED' ? [] : result.categories,
+  };
+}
+
+// 判断軸別の最終サマリーを生成する。「最適解」という断定はせず、
+// 「何を優先すると、どの案になるか」を軸ごとに整理する。
+function buildJudgmentSummary_(planA, planB, planC, planD, coreRequiredAmount) {
+  const noSalePlans = [planA, planB, planC];
+
+  // ①シンプルさ: coreRequiredAmountを新規資金だけで満たせる案を優先（A→B→Cの提示順を維持）
+  const simplest = noSalePlans.filter(p => p.nisaInvestmentAmount >= coreRequiredAmount)[0] || planC;
+
+  // ②税負担: 売却を伴わないA/B/Cは常に0円
+  const lowestTaxNote = 'A・B・Cのいずれも特定口座を売却しない案は税負担0円です';
+
+  // ③CORE化速度: 投資後CORE比率が最も高い案。
+  // 2026-08-15追加: 同率（実質的に差がない）場合に特定の案を優先しているように見えないよう、
+  // 該当する案が複数あるときは「差なし」と明示する。新しいスコアリングは作らず、
+  // 既に計算済みのafterCoreRatioPctを比較するだけの最小修正。
+  const allPlans = [planA, planB, planC, planD];
+  const maxCoreRatioPct = Math.max.apply(null, allPlans.map(p => p.coreRatio.afterCoreRatioPct));
+  const topCorePlans = allPlans.filter(p => p.coreRatio.afterCoreRatioPct === maxCoreRatioPct);
+  const fastestCoreOption = topCorePlans.length > 1
+    ? {
+        label: topCorePlans.map(p => p.label).join('/'),
+        note: topCorePlans.map(p => p.label).join('/') + 'で投資後CORE比率に差はありません（いずれも約' + maxCoreRatioPct + '%、現在約' + topCorePlans[0].coreRatio.currentCoreRatioPct + '%）',
+      }
+    : {
+        label: topCorePlans[0].label,
+        note: topCorePlans[0].description + '（投資後CORE比率 約' + maxCoreRatioPct + '%、現在約' + topCorePlans[0].coreRatio.currentCoreRatioPct + '%）が他の案より高くなります',
+      };
+
+  // ④非課税運用期間: 年初一括(A)が理論上最も長い（正確な日数計算はせず、事実として明記するに留める）
+  const earliestTiming = planA;
+
+  return {
+    simplestOption: { label: simplest.label, note: simplest.description + '（NISA投資額 約' + simplest.nisaInvestmentAmount + '円）' },
+    lowestTaxOption: { label: 'A/B/C', note: lowestTaxNote },
+    fastestCoreOption: fastestCoreOption,
+    earliestTimingOption: { label: earliestTiming.label, note: '年初一括のため、NISAでの非課税運用期間が最も長くなります（将来のリターンを予測するものではありません）' },
+    saleCandidateNote: planD.saleNeeded
+      ? '特定口座を売却する場合の候補: ' + planD.salePlan.map(p => p.fundName + '（約' + p.sellAmount + '円、推定税額約' + p.estimatedTax + '円）').join('、')
+      : '現時点では、Cの新規資金だけで目標配分の実需要を満たせるため、追加売却の必要性は低いと考えられます',
+    noSaleOption: 'A・B・Cはいずれも特定口座を売却せずに実行できる案です。税負担を避けたい場合はこれらを優先する選択肢が十分成立します。',
+    mainFactors: [
+      'NISA枠に対する新規資金（ボーナス・積立・現金余力）の充足度',
+      '特定口座の含み益率と推定税負担',
+      'CORE（オルカン・S&P500）比率への影響',
+      'NISAへの投入タイミング（非課税運用期間の長さ）',
+    ],
+    caution: 'これは将来のリターンを予測した断定ではなく、現在の資産状況・税負担・NISA投入タイミング・資金計画を比較した結果です。最終判断はご自身で行ってください。推定税額は20.315%による簡易試算であり、損益通算等の確定申告上の計算は完全には再現していません。',
+  };
+}
+
+function toManYen_(yen) {
+  return Math.round((yen || 0) / 10000);
+}
+
+function formatYenWithComma_(n) {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// 万円単位への丸めで0万円になってしまう小額（税額など）が「税負担なし」に見えないよう、
+// 0万円に丸まる非ゼロ額は実額（円）を併記する。
+function formatManYen_(yen) {
+  const v = yen || 0;
+  const man = toManYen_(v);
+  if (man === 0 && Math.round(v) !== 0) {
+    return '約0万円（' + formatYenWithComma_(v) + '円）';
+  }
+  return '約' + man + '万円';
+}
+
+// 売却候補1件分の理由を「賛成/反対」両方含む1文にまとめる（含み益率だけの機械的判断にしないため）
+function formatCategoryReasonsForSale_(c) {
+  const parts = [];
+  if (c.reasonsFor && c.reasonsFor.length > 0) parts.push(c.reasonsFor.join('。'));
+  if (c.reasonsAgainst && c.reasonsAgainst.length > 0) parts.push('（留意点: ' + c.reasonsAgainst.join('。') + '）');
+  return parts.join(' ');
+}
+
+// Phase6追加（2026-08-15）: NisaStrategyEngineD()の構造化された計算結果を、
+// 毎年そのまま読める平文サマリーに変換する純粋な整形関数。
+// 新規追加のみで、planA〜D/saleCandidates/judgmentSummaryの計算ロジックには一切関与しない
+// （それらの値をテキストへ組み立て直すだけ）。「最適」「絶対」「必ず」等の断定表現は使わず、
+// 「〜という選択肢があります」「〜を優先する場合は〜」の形で統一する。
+function buildPlainTextSummary_(p) {
+  const lines = [];
+  lines.push('【翌年NISA判断】（' + p.targetYear + '年）');
+  lines.push('');
+
+  if (p.executability.executable) {
+    lines.push('■ 実行可能性: 現時点で投資可能な資金があります（投資可能資金 ' + formatManYen_(p.executability.currentCash - p.executability.protectedCashMin) + '）');
+  } else {
+    lines.push('■ 実行可能性: 現時点では投資・売却は実行できません（' + p.executability.reason + '）');
+  }
+  lines.push(p.referenceSimulationNotice);
+  lines.push('');
+
+  const planLine = function (plan, timingLabel) {
+    const cr = plan.coreRatio;
+    return [
+      '投資額：' + formatManYen_(plan.nisaInvestmentAmount),
+      'タイミング：' + timingLabel,
+      'CORE比率：' + cr.currentCoreRatioPct + '% → ' + cr.afterCoreRatioPct + '%',
+      'NISA使用額：' + formatManYen_(plan.nisaInvestmentAmount),
+      '税負担：0円（特定口座を売却しないため）',
+      'ポイント：' + (plan.nisaInvestmentAmount > 0
+        ? 'CORE（オルカン・S&P500）の目標配分に対する不足分の範囲内で、NISAへ投資する場合の案です'
+        : '現時点ではCOREが目標配分にほぼ到達しているため、この案でのNISA新規投資額は0円になります'),
+    ].join('\n');
+  };
+
+  lines.push('■ 年初一括');
+  lines.push(planLine(p.planA, p.targetYear + '年1月'));
+  lines.push('');
+  lines.push('■ 月' + p.monthlyContribution + '円積立');
+  lines.push(planLine(p.planB, '毎月（年間' + formatManYen_(p.annualContribution) + '）'));
+  lines.push('');
+  lines.push('■ HYBRID（ボーナス＋積立）');
+  lines.push(planLine(p.planC, p.targetYear + '年1月＋毎月'));
+  lines.push('');
+
+  lines.push('■ 特定口座売却＋NISA');
+  if (p.planD.saleNeeded) {
+    const names = p.planD.salePlan.map(function (s) { return s.fundName; }).join('・');
+    const remainTotal = p.planD.salePlan.reduce(function (s, x) { return s + x.remainingBalance; }, 0);
+    lines.push('売却：' + names);
+    lines.push('売却額：' + formatManYen_(p.planD.saleAmount));
+    lines.push('推定税額：' + formatManYen_(p.planD.estimatedTax));
+    lines.push('税引後手取り：' + formatManYen_(p.planD.netProceeds));
+    lines.push('NISA投資額：' + formatManYen_(p.planD.nisaInvestmentAmount) + '（HYBRID案＋売却手取り分）');
+    lines.push('売却後残高（対象銘柄合計）：' + formatManYen_(remainTotal));
+    lines.push('CORE比率：' + p.planD.coreRatio.currentCoreRatioPct + '% → ' + p.planD.coreRatio.afterCoreRatioPct + '%');
+    lines.push('売却理由：HYBRID案の新規資金だけではCORE目標配分に対する不足分（' + formatManYen_(p.coreRequiredAmount) + '）を満たせない場合に、含み益率・目標配分との差・税負担を踏まえて売却候補を積み上げた一案です（断定ではありません）');
+    if (!p.executability.executable) lines.push('※これは来年の資金を前提とした参考シミュレーションであり、現時点での売却実行を意味しません');
+  } else {
+    lines.push('現時点では、HYBRID案（ボーナス＋積立）の新規資金だけでCORE目標配分の実需要（' + formatManYen_(p.coreRequiredAmount) + '）を満たせるため、特定口座を売却する必要性は低いと考えられます。');
+    lines.push('CORE比率：' + p.planD.coreRatio.currentCoreRatioPct + '% → ' + p.planD.coreRatio.afterCoreRatioPct + '%（売却しない場合）');
+  }
+  lines.push('');
+
+  lines.push('【売却候補】（含み益率が低い順に参考として並べたものであり、これ単独が売却基準ではありません）');
+  if (p.saleCandidates.length === 0) {
+    lines.push('特定口座データが取得できないため、売却候補を提示できません。');
+  } else {
+    p.saleCandidates.forEach(function (c, i) {
+      const inPlan = p.planD.salePlan.filter(function (s) { return s.category === c.category; })[0];
+      lines.push((i + 1) + '位 ' + c.fundName + (c.isCoreCategory ? '（CORE銘柄）' : ''));
+      lines.push('・評価額：' + formatManYen_(c.value));
+      lines.push('・含み益：' + formatManYen_(c.gain));
+      lines.push('・含み益率：' + c.gainPct + '%');
+      if (inPlan) {
+        lines.push('・売却額：' + formatManYen_(inPlan.sellAmount) + '（今回のシミュレーションの売却プランに含まれています）');
+        lines.push('・推定税額：' + formatManYen_(inPlan.estimatedTax));
+        lines.push('・税引後手取り：' + formatManYen_(inPlan.netProceeds));
+        lines.push('・売却後残高：' + formatManYen_(inPlan.remainingBalance));
+      } else {
+        lines.push('・売却額：-（今回のシミュレーションでは売却対象に含まれていません）');
+      }
+      lines.push('・候補理由：' + formatCategoryReasonsForSale_(c));
+      lines.push('');
+    });
+  }
+
+  lines.push('【判断軸】');
+  lines.push('・最もシンプルな案：' + p.judgmentSummary.simplestOption.label + '案（' + p.judgmentSummary.simplestOption.note + '）という選択肢があります');
+  lines.push('・税負担を抑える場合：' + p.judgmentSummary.lowestTaxOption.note);
+  // fastestCoreOption.labelが'/'区切り（同率＝差なし）の場合は「優先する選択肢」という
+  // 特定案を推す文言を付けない（buildJudgmentSummary_側の「差なし」判定と矛盾しないようにするため）
+  const fc = p.judgmentSummary.fastestCoreOption;
+  lines.push('・CORE比率を早く高めたい場合：' + (fc.label.indexOf('/') !== -1
+    ? fc.note
+    : fc.label + '案（' + fc.note + '）を優先する選択肢があります'));
+  lines.push('・投資タイミングを早めたい場合：' + p.judgmentSummary.earliestTimingOption.note);
+  lines.push('・売却しない場合：' + p.judgmentSummary.noSaleOption);
+  lines.push('');
+
+  lines.push('【現時点の整理】');
+  lines.push(p.judgmentSummary.saleCandidateNote);
+  lines.push(p.judgmentSummary.caution);
+
+  return lines.join('\n');
+}
+
+// Phase6メイン関数。翌年NISA枠について「年初一括／積立／HYBRID／特定口座売却」を
+// 比較し、判断材料を返す（自動売買・自動発注は一切行わない）。
+// testOverrides: { cashRules, engineAOverrides, targetYear, eligibility,
+//                  currentAllocation, engineAResult, tokuteiHoldings,
+//                  bonusAmount, monthlyNisaContribution }
+//
+// 2026-08-15仕様変更: 「実行可能性」と「将来の参考シミュレーション」を分離する。
+// Phase1〜5のHARD RULE（currentCash<=protectedCashMinなら実行不可）自体は一切変更しない。
+// NisaStrategyEngineC()（Phase4C、無改修）を呼び、その判定結果を「executability」として
+// そのまま表示用に読み取るだけ。以前はここでBLOCKEDの場合に処理を打ち切り、
+// planA〜D/saleCandidatesを一切計算していなかったが、これがPhase6の目的
+// （翌年ボーナス・積立を使ってどう判断するか）と衝突していたため、
+// 「今すぐ実行できるか」の判定結果に関わらずA〜Dの参考シミュレーションは必ず計算する
+// ように変更した。ただし実資産データ自体が取得できない場合（dataQuality===UNAVAILABLE）は
+// シミュレーションの前提データが無いため、従来通りここで打ち切る。
+function NisaStrategyEngineD(testOverrides) {
+  const opts = testOverrides || {};
+  const calculatedAt = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+  const targetYear = opts.targetYear || (new Date().getFullYear() + 1);
+
+  const cashOnlyResult = NisaStrategyEngineC(opts);
+
+  // 実資産データそのものが取得できない場合のみ、参考シミュレーションも算出不能として打ち切る
+  // （HARD RULEによるBLOCKED＝現金不足とは別軸。cashOnlyResult.dataQualityで区別する）。
+  if (cashOnlyResult.dataQuality === 'UNAVAILABLE') {
+    return {
+      status: 'DATA_UNAVAILABLE',
+      targetYear: targetYear,
+      executability: {
+        executable: false,
+        reason: cashOnlyResult.status === 'BLOCKED' ? cashOnlyResult.summary.reason : '実資産データを取得できません',
+      },
+      referenceSimulationNotice: '実資産データ（投資管理ダッシュボード）が取得できないため、将来の参考シミュレーションも算出できません',
+      plainTextSummary: '【翌年NISA判断】\n\n実資産データが取得できないため、判断材料を算出できません。投資管理ダッシュボードの接続状況をご確認ください。',
+      planA: null, planB: null, planC: null, planD: null,
+      saleCandidates: [],
+      judgmentSummary: null,
+      dataQuality: cashOnlyResult.dataQuality,
+      warnings: cashOnlyResult.warnings,
+      calculatedAt: calculatedAt,
+    };
+  }
+
+  // ── ①実行可能性（HARD RULEそのもの。Phase1〜5の判定条件は無改修） ──
+  const realCashRules = opts.cashRules || getCashRules();
+  const executable = cashOnlyResult.status !== 'BLOCKED';
+  const executability = {
+    executable: executable,
+    reason: executable ? null : cashOnlyResult.summary.reason,
+    currentCash: realCashRules.currentCash,
+    protectedCashMin: realCashRules.protectedCashMin,
+  };
+
+  // ── ②将来の参考シミュレーション（実行可能性に関わらず必ず計算する） ──
+  // investableCashはengineA(NisaStrategyEngine)のHARD RULEと同一の定義
+  // （Math.max(0, currentCash-protectedCashMin)）で、cashOnlyResultがBLOCKEDの場合
+  // （finalDecisionがnull）でも参照できるようここで直接算出する。計算式自体は
+  // engineA(623行目付近)と同一で、新しい判定ロジックを追加したものではない。
+  const currentCashRaw = realCashRules.currentCash;
+  const currentCashValid = !(currentCashRaw === null || currentCashRaw === undefined || isNaN(currentCashRaw) || currentCashRaw < 0);
+  const investableCash = currentCashValid ? Math.max(0, currentCashRaw - realCashRules.protectedCashMin) : 0;
+
+  const bonusAmount = opts.bonusAmount != null ? opts.bonusAmount : NEXT_YEAR_BONUS_AMOUNT;
+  const monthlyContribution = opts.monthlyNisaContribution != null ? opts.monthlyNisaContribution : NEXT_YEAR_MONTHLY_NISA_CONTRIBUTION;
+  const annualContribution = monthlyContribution * 12;
+
+  const realEligibility = opts.eligibility || getCategoryNisaEligibility_();
+  const coreOnlyEligibility = buildCoreOnlyEligibility_(realEligibility);
+  const currentAllocation = opts.currentAllocation || getCurrentAllocation();
+  const engineAResult = opts.engineAResult || NisaStrategyEngine(opts.engineAOverrides);
+  const tokuteiHoldings = opts.tokuteiHoldings || getTokuteiHoldings();
+
+  const warnings = cashOnlyResult.warnings.slice();
+  if (tokuteiHoldings.dataQuality === 'UNAVAILABLE') warnings.push('特定口座データが取得できず、D案（売却候補）を提示できません: ' + tokuteiHoldings.warnings.join(' / '));
+
+  // 「NISAへ投入する合理性がある金額」をCORE限定のPhase4B参照実行で求める
+  // （360万円固定ではなく、CORE2カテゴリの目標配分の実需要ベース）
+  const coreRequiredAmount = getNisaRequiredAmount_(Object.assign({}, opts, { cashRules: realCashRules, eligibility: coreOnlyEligibility }));
+
+  // ── A/B/C: 新規資金のみのシナリオ（CORE限定） ──
+  const planA = runCoreFundingScenario_('A', '年初一括（ボーナス＋現金余力を翌年1月に投入）', targetYear, investableCash + bonusAmount, coreOnlyEligibility, currentAllocation, opts);
+  const planB = runCoreFundingScenario_('B', '積立（月' + monthlyContribution + '円×12ヶ月）', targetYear, annualContribution, coreOnlyEligibility, currentAllocation, opts);
+  const planC = runCoreFundingScenario_('C', 'HYBRID（ボーナス＋積立）', targetYear, investableCash + bonusAmount + annualContribution, coreOnlyEligibility, currentAllocation, opts);
+
+  // ── D: Cを基本形に、特定口座売却の合理性を評価する。
+  //    「不足額を埋めるだけ」ではなく、特定口座の全銘柄を対象に売却候補を常に提示し、
+  //    Cの新規資金だけで実需要を満たせる場合はsalePlanが空（＝売却不要）になる。
+  let saleCandidates = [];
+  let salePlan = [];
+  if (tokuteiHoldings.dataQuality !== 'UNAVAILABLE') {
+    saleCandidates = getSaleCandidates_(tokuteiHoldings, engineAResult, realEligibility);
+    const remainingForD = Math.max(0, coreRequiredAmount - planC.nisaInvestmentAmount);
+    salePlan = buildSalePlan_(saleCandidates, remainingForD);
+  }
+  const totalSellAmount = salePlan.reduce((s, p) => s + p.sellAmount, 0);
+  const totalEstimatedTax = salePlan.reduce((s, p) => s + p.estimatedTax, 0);
+  const totalNetProceeds = salePlan.reduce((s, p) => s + p.netProceeds, 0);
+  const saleCoreValueDelta = salePlan.reduce((s, p) => s + p.coreValueDelta, 0);
+  const saleTotalValueDelta = salePlan.reduce((s, p) => s + p.totalValueDelta, 0);
+
+  const planD = {
+    label: 'D',
+    description: '特定口座売却＋NISA（Cを基本形に、必要または合理性がある場合の売却分を追加）',
+    baseOn: 'C',
+    nisaInvestmentAmount: planC.nisaInvestmentAmount + totalNetProceeds,
+    saleAmount: totalSellAmount,
+    estimatedTax: totalEstimatedTax,
+    netProceeds: totalNetProceeds,
+    coreRatio: getCoreRatio_(currentAllocation, planC.coreValueDelta + saleCoreValueDelta, planC.totalValueDelta + saleTotalValueDelta),
+    saleNeeded: salePlan.length > 0,
+    salePlan: salePlan,
+  };
+
+  const judgmentSummary = buildJudgmentSummary_(planA, planB, planC, planD, coreRequiredAmount);
+  const currentCoreRatio = getCoreRatio_(currentAllocation, 0, 0);
+
+  // ── ③実行可能性と参考シミュレーションを混同させないための明示メッセージ ──
+  const referenceSimulationNotice = executable
+    ? '以下は翌年の資金計画に基づく参考シミュレーションです。断定的な最適解ではなく、判断材料としてご利用ください。'
+    : '現在の現金残高は防衛ライン（protectedCashMin）以下のため、現時点での投資・売却の実行はできません（HARD RULE）。以下は翌年のボーナス・積立を前提とした将来の判断材料としてのシミュレーションであり、現在の投資実行を許可するものではありません。';
+
+  const plainTextSummary = buildPlainTextSummary_({
+    executability: executability,
+    referenceSimulationNotice: referenceSimulationNotice,
+    targetYear: targetYear,
+    bonusAmount: bonusAmount,
+    monthlyContribution: monthlyContribution,
+    annualContribution: annualContribution,
+    coreRequiredAmount: coreRequiredAmount,
+    planA: planA, planB: planB, planC: planC, planD: planD,
+    saleCandidates: saleCandidates,
+    judgmentSummary: judgmentSummary,
+  });
+
+  return {
+    status: 'OK',
+    targetYear: targetYear,
+    executability: executability,
+    referenceSimulationNotice: referenceSimulationNotice,
+    annualNisaLimit: NISA_ANNUAL_GROWTH_LIMIT + NISA_ANNUAL_TSUMITATE_LIMIT,
+    bonusAmount: bonusAmount,
+    monthlyNisaContribution: monthlyContribution,
+    annualContribution: annualContribution,
+    coreCategories: CORE_CATEGORIES.slice(),
+    coreRequiredAmount: coreRequiredAmount,
+    currentCoreRatio: currentCoreRatio,
+    planA: planA,
+    planB: planB,
+    planC: planC,
+    planD: planD,
+    saleCandidates: saleCandidates,
+    judgmentSummary: judgmentSummary,
+    plainTextSummary: plainTextSummary,
+    dataQuality: cashOnlyResult.dataQuality,
+    warnings: warnings,
+    calculatedAt: calculatedAt,
+  };
+}
+
+// ── テスト関数群（Phase6）。本番のCURRENT_CASH・取引履歴等は一切変更しない ──
+
+// TEST P6-4: 売却時の税額計算が正しいか（既知の数値で検算、構造変更の影響を受けないため維持）
+function testEngineD_Case4_TaxCalculationSanityCheck() {
+  // 評価額100万円・含み益20万円（含み益率25%）のカテゴリを50万円分売却した場合
+  const result = estimateCapitalGainsTax_(500000, 1000000, 200000);
+  Logger.log('■ TEST P6-4（税額計算の検算）:');
+  Logger.log(JSON.stringify(result, null, 2));
+  // 期待値: 実現益=500000/1000000×200000=100000円、税額=100000×0.20315=20315円、手取り=500000-20315=479685円
+  Logger.log('検証: estimatedRealizedGain=' + result.estimatedRealizedGain + ' (期待値: 100000), estimatedTax=' + result.estimatedTax + ' (期待値: 20315), netProceeds=' + result.netProceeds + ' (期待値: 479685)');
+}
+
+// TEST P6-5 / T1・T2・T3・T7: HARD RULE（実行可能性）と将来の参考シミュレーションの分離確認。
+// 2026-08-15仕様変更により、旧来の「BLOCKEDなら全案null」は廃止した
+// （HARD RULE自体は無変更。「今すぐ実行できるか」の判定結果が変わったのではなく、
+//   BLOCKED時にA〜Dの計算そのものを止めていた挙動をやめただけ）。
+function testEngineD_Case5_HardRuleBlocksAllPlans() {
+  const cashRules = Object.assign({}, getCashRules(), { currentCash: getCashRules().protectedCashMin });
+  const result = NisaStrategyEngineD({ cashRules: cashRules, engineAOverrides: { cashRules: cashRules } });
+  Logger.log('■ TEST P6-5 / T1・T2・T3・T7（currentCash=protectedCashMin、実行可能性と参考シミュレーションの分離確認）:');
+  Logger.log('executability=' + JSON.stringify(result.executability));
+  Logger.log('referenceSimulationNotice=' + result.referenceSimulationNotice);
+  Logger.log('■ plainTextSummary（冒頭部分）:');
+  Logger.log(result.plainTextSummary.split('\n').slice(0, 6).join('\n'));
+
+  const plansNotNull = result.planA !== null && result.planB !== null && result.planC !== null && result.planD !== null;
+  const noticeIsClear = result.referenceSimulationNotice.indexOf('実行はできません') !== -1;
+  const forbiddenPhrases = ['今すぐ売却', '今すぐ購入', 'ただちに実行', 'この内容で発注'];
+  const hasForbiddenPhrase = forbiddenPhrases.some(function (w) { return result.plainTextSummary.indexOf(w) !== -1; });
+
+  Logger.log('検証(T1): executability.executable=' + result.executability.executable + ' (期待値: false)');
+  Logger.log('検証(T2): planA/B/C/Dがnullでない=' + plansNotNull + ' (期待値: true)');
+  Logger.log('検証(T3): referenceSimulationNoticeに「実行はできません」を含む=' + noticeIsClear + ' (期待値: true)');
+  Logger.log('検証(T7): 実行可能と誤認させる文言を含まない=' + !hasForbiddenPhrase + ' (期待値: true)');
+}
+
+// TEST P6-6: NISA購入対象がCORE(オルカン+S&P500)に限定されているか確認
+function testEngineD_Case6_CoreOnlyNisaPurchase() {
+  const cashRules = Object.assign({}, getCashRules(), { currentCash: getCashRules().protectedCashMin + 20000000 });
+  const result = NisaStrategyEngineD({ cashRules: cashRules, engineAOverrides: { cashRules: cashRules } });
+  Logger.log('■ TEST P6-6（NISA購入対象のCORE限定確認）:');
+  Logger.log(JSON.stringify(result, null, 2));
+  const nonCoreInPlanA = (result.planA.categories || []).filter(c => c.recommendedAmount > 0 && CORE_CATEGORIES.indexOf(c.category) === -1);
+  Logger.log('検証: planAでCORE以外に配分されたカテゴリ数=' + nonCoreInPlanA.length + ' (期待値: 0)');
+}
+
+// TEST P6-7: 特定口座の売却候補が全銘柄（CORE限定しない）を対象にしているか確認
+function testEngineD_Case7_SaleCandidatesIncludeNonCore() {
+  const cashRules = Object.assign({}, getCashRules(), { currentCash: getCashRules().protectedCashMin + 20000000 });
+  const result = NisaStrategyEngineD({ cashRules: cashRules, engineAOverrides: { cashRules: cashRules } });
+  Logger.log('■ TEST P6-7（売却候補が全銘柄対象か確認）:');
+  Logger.log(JSON.stringify(result.saleCandidates, null, 2));
+  const nonCoreCandidates = result.saleCandidates.filter(c => CORE_CATEGORIES.indexOf(c.category) === -1);
+  Logger.log('検証: 売却候補件数=' + result.saleCandidates.length + '、うちCORE外件数=' + nonCoreCandidates.length + '（CORE外も候補に含まれるはず）');
+}
+
+// TEST P6-8: buildSalePlan_()の非空の売却プラン組成ロジック自体を実行検証するためのテスト。
+// 「実データで売却が必要になる」ことの確認が目的ではない。実データでは
+// オルカン・S&P500が既に目標配分付近のためcoreRequiredAmount=0・saleNeeded=falseとなり、
+// これは正しい結果である（2026-08-14確認）。
+// そのためtestOverrides.currentAllocationのみを使い、CORE銘柄のうちオルカンだけを
+// 意図的にunderweightにしてcoreRequiredAmount>0を作り出す
+// （本番データは一切変更しない。CURRENT_CASH・取引履歴・資金ルール・目標配分・
+//   ダッシュボードへの書き込みは行わない）。
+// 注意: currentWeight/gapOverall/priorityScore等はengineA(Phase4A)側で計算されるため、
+// トップレベルのcurrentAllocationだけでなくengineAOverrides.currentAllocationにも
+// 同じ合成データを渡す必要がある（渡さないとPhase4Aが実データのcurrentWeightで
+// 「既に目標達成」と判定し、waterfillが発動しない。2026-08-14 1回目のテストで確認）。
+// 結果として売却候補(saleCandidates)の理由付けもこの合成データに基づく点に注意
+// （実データでの売却候補の見え方を確認したい場合は別途 engineAOverrides を実データに戻すこと）。
+function testEngineD_Case8_SaleNeeded() {
+  const cashRules = Object.assign({}, getCashRules(), { currentCash: getCashRules().protectedCashMin + 10000 });
+
+  // 実データ由来（2026-08-14 TEST P6-8実行時点の値）。オルカンのみ意図的に減らし、
+  // CORE内の1カテゴリを目標未達（underweight）にする。他8カテゴリは実データのまま。
+  const totalValue = 4462545 + 2114767 + 2261135 + 1093322 + 118918 + 1714181 + 383781 + 4500000 + 6953488; // 23602137
+  const currentAllocation = {
+    calculatedAt: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
+    totalValue: totalValue,
+    dataQuality: 'OK',
+    warnings: [],
+    byCategory: [
+      { category: 'FANG+',     value: 4462545 },
+      { category: '半導体',     value: 2114767 },
+      { category: 'NASDAQ100', value: 2261135 },
+      { category: 'Zテック20',  value: 1093322 },
+      { category: '宇宙株',     value: 118918 },
+      { category: 'ゴールド',   value: 1714181 },
+      { category: '国内株式',   value: 383781 },
+      { category: 'オルカン',   value: 4500000 }, // 実データ7463889円→意図的にunderweight化
+      { category: 'S&P500',    value: 6953488 }, // 実データのまま（目標達成済み）
+    ].map(c => Object.assign(c, { principal: c.value, gain: 0, gainPct: 0, weight: pct_(c.value, totalValue) })),
+  };
+
+  const result = NisaStrategyEngineD({
+    cashRules: cashRules,
+    engineAOverrides: { cashRules: cashRules, currentAllocation: currentAllocation },
+    monthlyNisaContribution: 5000,
+    currentAllocation: currentAllocation,
+  });
+  Logger.log('■ TEST P6-8 / T5・T6（currentAllocationのみ上書き・オルカンをunderweight化してbuildSalePlan_を実行検証）:');
+  Logger.log('executability=' + JSON.stringify(result.executability) + '（このケースはcurrentCash>protectedCashMinのためexecutable=trueのはず）');
+  Logger.log('coreRequiredAmount=' + result.coreRequiredAmount);
+  Logger.log('planA.nisaInvestmentAmount=' + result.planA.nisaInvestmentAmount);
+  Logger.log('planB.nisaInvestmentAmount=' + result.planB.nisaInvestmentAmount);
+  Logger.log('planC.nisaInvestmentAmount=' + result.planC.nisaInvestmentAmount);
+  Logger.log('■ planD:');
+  Logger.log(JSON.stringify(result.planD, null, 2));
+  const requiredForD = Math.max(0, result.coreRequiredAmount - result.planC.nisaInvestmentAmount);
+  Logger.log('検証: coreRequiredAmount=' + result.coreRequiredAmount + '（>0のはず）、planC.nisaInvestmentAmount=' + result.planC.nisaInvestmentAmount
+    + '、D必要額(requiredForD)=' + requiredForD
+    + '、planD.saleNeeded=' + result.planD.saleNeeded
+    + '、salePlan件数=' + result.planD.salePlan.length
+    + '、totalNetProceeds=' + result.planD.netProceeds
+    + '（>= requiredForD のはず、または全候補売却済みなら理由を確認）');
+  Logger.log('■ T6確認用 plainTextSummary（全文）:');
+  Logger.log(result.plainTextSummary);
+}
+
+// TEST P6-9 / T4: 実データでCOREが既に目標配分にほぼ到達している場合、
+// coreRequiredAmount・planA/B/CのnisaInvestmentAmountを無理に0以外へ変更していないことを確認する
+// （NISA枠を埋めることを目的化しない、というPhase4B以来の既存方針の再確認。無改修）。
+function testEngineD_T4_CoreAtTargetNotForced() {
+  const result = NisaStrategyEngineD(); // 実データそのまま（cashRules等の上書きなし）
+  Logger.log('■ TEST P6-9 / T4（実データ、COREが目標配分にほぼ到達している場合の確認）:');
+  Logger.log('coreRequiredAmount=' + result.coreRequiredAmount);
+  Logger.log('currentCoreRatio=' + JSON.stringify(result.currentCoreRatio));
+  Logger.log('planA.nisaInvestmentAmount=' + result.planA.nisaInvestmentAmount
+    + '、planB.nisaInvestmentAmount=' + result.planB.nisaInvestmentAmount
+    + '、planC.nisaInvestmentAmount=' + result.planC.nisaInvestmentAmount);
+  Logger.log('検証(T4): CORE(オルカン28.1%前後/S&P500 26.17%前後)が目標付近のため、coreRequiredAmount=0、'
+    + 'planA/B/C.nisaInvestmentAmount=0 が期待値（NISA枠360万円を埋めるために強制配分していないこと）');
+}
+
+// 実データ確認用（本番シートは変更しない）。平文サマリー（plainTextSummary）も出力する。
+function testEngineD_RealData() {
+  const result = NisaStrategyEngineD();
+  Logger.log('■ Phase6 実データ確認（本番CURRENT_CASHのまま）:');
+  Logger.log('executability=' + JSON.stringify(result.executability));
+  Logger.log('coreRequiredAmount=' + result.coreRequiredAmount + '、currentCoreRatio=' + JSON.stringify(result.currentCoreRatio));
+  Logger.log('■ 平文サマリー（plainTextSummary、全文）:');
+  Logger.log(result.plainTextSummary);
+}
