@@ -142,6 +142,30 @@ function dayBefore(dateStr) {
 // ── データ取得 ────────────────────────────────────────────────
 
 /**
+ * GAS Web Appの一時的な障害（HTTP 404等・lib/sheets.jsのfetchTは1回しか自動リトライしない）
+ * で投資回数/WAIT回数/総投資額の集計元データが取れないと、weeklyFacts側は「取得失敗」と
+ * 「その週は本当に0件だった」を区別できず、記事は事実と異なる「今週は活動なし」を書いてしまう
+ * （2026-08-21 実際は5件の判断＝WAIT4/ACCUMULATE1が存在したのにGAS 404で0件と誤集計された
+ * インシデントの再発防止）。週刊記事の一次データ取得だけは、5秒待って最大2回まで追加リトライし、
+ * それでも失敗したら黙って空配列にせず例外を投げてpublishWeekly全体を失敗させる（安全側に倒す）。
+ */
+async function fetchWeeklyCritical(label, fn, retries = 2) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        console.warn(`[weekly] ${label} 取得失敗（${attempt + 1}/${retries + 1}回目）: ${err.message} → 5秒後にリトライ`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+  }
+  throw new Error(`${label} の取得に${retries + 1}回とも失敗しました: ${lastErr.message}`);
+}
+
+/**
  * 指定期間のデータを一次ソースから収集し、lib/weeklyFacts.js で確定値化する。
  * 日刊記事生成ロジック・売買ロジック・final_decisions/department_recommendations の
  * 既存データには一切書き込まない（読み取り専用）。
@@ -158,11 +182,11 @@ async function gatherWeeklyData(startDate, endDate) {
     devLogRows,
     allCapitalEvents,
   ] = await Promise.all([
-    sheets.getRowsByDateRange('market_data',               startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('agent_recommendations',      startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('department_recommendations', startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('final_decisions',             startDate, endDate).catch(() => []),
-    sheets.getRowsByDateRange('orders',                       startDate, endDate).catch(() => []),
+    fetchWeeklyCritical('market_data',               () => sheets.getRowsByDateRange('market_data',               startDate, endDate)),
+    fetchWeeklyCritical('agent_recommendations',      () => sheets.getRowsByDateRange('agent_recommendations',      startDate, endDate)),
+    fetchWeeklyCritical('department_recommendations', () => sheets.getRowsByDateRange('department_recommendations', startDate, endDate)),
+    fetchWeeklyCritical('final_decisions',            () => sheets.getRowsByDateRange('final_decisions',             startDate, endDate)),
+    fetchWeeklyCritical('orders',                     () => sheets.getRowsByDateRange('orders',                       startDate, endDate)),
     sheets.getLatestRowAsOf('portfolio_status', endDate).catch(() => null),
     sheets.getLatestRowAsOf('portfolio_status', dayBefore(startDate)).catch(() => null),
     sheets.getRowsByDateRange('development_logs',             startDate, endDate).catch(() => []),
@@ -877,11 +901,12 @@ async function publishWeekly(startDate, endDate) {
         chartPath:        portfolioChartPath,
         thumbPath,
       });
-      console.log(`[weekly] 要確認Draftをnote下書きに保存しました（${reason}）: ${result.url}`);
-      return result.url;
+      const embedded = [result.historyEmbedded, result.chartEmbedded].filter(Boolean).length;
+      console.log(`[weekly] 要確認Draftをnote下書きに保存しました（${reason}）: ${result.url} (Graphs Embedded: ${embedded}/2)`);
+      return { url: result.url, graphsEmbedded: embedded };
     } catch (err) {
       console.error(`[weekly] 要確認Draftの保存に失敗しました（${reason}）: ${err.message}`);
-      return null;
+      return { url: null, graphsEmbedded: 0 };
     }
   }
 
@@ -889,10 +914,10 @@ async function publishWeekly(startDate, endDate) {
   if (graphsGenerated < 2) {
     console.error(`[weekly] グラフ生成が${graphsGenerated}/2枚のため公開可の下書きにはできません`);
     const validation = validateWeeklyArticle(cleaned, facts, { graphsGenerated });
-    const fallbackDraftUrl = await saveFallbackDraft('グラフ生成不足');
+    const fallback = await saveFallbackDraft('グラフ生成不足');
     return {
-      note: cleaned, meta, noteUrl: null, fallbackDraftUrl, approved: false,
-      validation, graphsGenerated, graphsEmbedded: 0, chartsIncomplete: true,
+      note: cleaned, meta, noteUrl: null, fallbackDraftUrl: fallback.url, approved: false,
+      validation, graphsGenerated, graphsEmbedded: fallback.graphsEmbedded, chartsIncomplete: true,
     };
   }
 
@@ -900,10 +925,10 @@ async function publishWeekly(startDate, endDate) {
   const preValidation = validateWeeklyArticle(cleaned, facts, { graphsGenerated });
   if (!preValidation.ok) {
     console.warn(`[weekly] Validator NG（警告${preValidation.warnings.length}件）\n${preValidation.warnings.join('\n\n')}`);
-    const fallbackDraftUrl = await saveFallbackDraft('Validator NG');
+    const fallback = await saveFallbackDraft('Validator NG');
     return {
-      note: cleaned, meta, noteUrl: null, fallbackDraftUrl, approved: false,
-      validation: preValidation, graphsGenerated, graphsEmbedded: 0, chartsIncomplete: true,
+      note: cleaned, meta, noteUrl: null, fallbackDraftUrl: fallback.url, approved: false,
+      validation: preValidation, graphsGenerated, graphsEmbedded: fallback.graphsEmbedded, chartsIncomplete: true,
     };
   }
 
@@ -911,10 +936,10 @@ async function publishWeekly(startDate, endDate) {
   console.log(`[weekly] Quality Score: ${score.total}点`);
   if (score.total < PUBLISH_SCORE_THRESHOLD_WEEKLY) {
     console.warn(`[weekly] Quality Score ${score.total}点が公開基準(${PUBLISH_SCORE_THRESHOLD_WEEKLY}点)未満のため公開を見送ります`);
-    const fallbackDraftUrl = await saveFallbackDraft('Quality Scoreが公開基準未満');
+    const fallback = await saveFallbackDraft('Quality Scoreが公開基準未満');
     return {
-      note: cleaned, meta, noteUrl: null, fallbackDraftUrl, approved: false,
-      validation: preValidation, score, graphsGenerated, graphsEmbedded: 0, chartsIncomplete: true,
+      note: cleaned, meta, noteUrl: null, fallbackDraftUrl: fallback.url, approved: false,
+      validation: preValidation, score, graphsGenerated, graphsEmbedded: fallback.graphsEmbedded, chartsIncomplete: true,
     };
   }
 
@@ -924,10 +949,10 @@ async function publishWeekly(startDate, endDate) {
   console.log(`[weekly] AI編集長レビュー完了: 判定=${editorReview.verdict} 編集長スコア=${editorReview.editorScore ?? 'N/A'}`);
   if (editorReview.verdict !== 'APPROVED') {
     console.warn(`[weekly] AI編集長が公開を見送りました: ${editorReview.comment || editorReview.reasons.join(' / ')}`);
-    const fallbackDraftUrl = await saveFallbackDraft('AI編集長が公開を見送り');
+    const fallback = await saveFallbackDraft('AI編集長が公開を見送り');
     return {
-      note: cleaned, meta, noteUrl: null, fallbackDraftUrl, approved: false,
-      validation: preValidation, score, editorReview, graphsGenerated, graphsEmbedded: 0, chartsIncomplete: true,
+      note: cleaned, meta, noteUrl: null, fallbackDraftUrl: fallback.url, approved: false,
+      validation: preValidation, score, editorReview, graphsGenerated, graphsEmbedded: fallback.graphsEmbedded, chartsIncomplete: true,
     };
   }
 
