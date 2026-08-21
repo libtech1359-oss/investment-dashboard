@@ -7,7 +7,7 @@
  * 再生成ループは「①機械修正 → ②Validator再実行 → （それでも残る場合のみ）③LLM再生成」
  * の順で動くため、この関数は必ずLLM再生成より先に呼ばれる。
  *
- * 対応ルールは articleValidator.js の Rule 9 / 18 / 26 / 27 / 28 / 30 / 31 と対になっている
+ * 対応ルールは articleValidator.js の Rule 9 / 18 / 21 / 26 / 27 / 28 / 30 / 31 と対になっている
  * （内容の書き直しが必要な Rule 1〜7・12〜25 等はここでは扱わずLLM再生成に委ねる）。
  * 見出しパターン・許可絵文字は articleValidator.js の同名ルールと手動で同期させること。
  */
@@ -126,6 +126,17 @@ function fixDisallowedHeadingEmoji(note) {
   return { note: out.join('\n'), changed };
 }
 
+// ── Rule 21: 橘アオイの規定書き出し（「〜現金状態です。」が「〜現金状態であり、」等の
+// 接続表現に変化してしまうケースを補修）。articleValidator.js Rule 21 は
+// 「現金状態」の直後が「です」でない場合に警告を出すが、LLM再生成では同じ接続表現を
+// 繰り返し再生成してしまうことがある（2026-08-21判明：6回再生成しても解消せず）ため、
+// 文を二つに割って機械的に「です。」へ差し替える。
+function fixAoiOpeningSentence(note) {
+  const re = /(AI Capital模擬ファンドは現在[\d.]+%現金状態)(?!です)(であり|であるため|であって|でして|となっており|となっていて|にあり|であることから|であるので)[、,]?/;
+  if (!re.test(note)) return { note, changed: false };
+  return { note: note.replace(re, '$1です。'), changed: true };
+}
+
 /**
  * @param {string} note
  * @returns {{ note: string, changed: boolean, fixesApplied: string[] }}
@@ -142,6 +153,7 @@ function autoFixLayout(note) {
     ['duplicate_sentence', fixDuplicateSentenceLines],
     ['heading_blank_line', fixHeadingBlankLine],
     ['disallowed_emoji',   fixDisallowedHeadingEmoji],
+    ['aoi_opening_sentence', fixAoiOpeningSentence],
   ];
 
   for (const [label, fn] of steps) {
