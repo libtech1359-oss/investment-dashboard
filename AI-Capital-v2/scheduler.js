@@ -1,11 +1,18 @@
 'use strict';
 
 const cron          = require('node-cron');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const secretary     = require('./secretary');
 const dataFetcher   = require('./lib/dataFetcher');
 const capitalEvents = require('./lib/capitalEvents');
 const weekly        = require('./agents/weekly');
 const health        = require('./lib/health');
+const pendingXPosts = require('./lib/pendingXPosts');
+const { isJpHoliday } = require('./lib/jpHolidays');
+
+function todayJST() {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+}
 
 const { writeLog, writeError } = (() => {
   const log = (tag, msg) => console.log(`[${tag}] ${msg}`);
@@ -45,7 +52,30 @@ async function notify(msg) {
   if (reportChannel) await reportChannel.send(msg).catch(() => {});
 }
 
+// X投稿候補を「𝕏に投稿」ボタン付きで通知する。ボタンのcustom_idは短いidのみ
+// （本文はpendingXPosts.jsに保存し、index.jsのボタンハンドラがidから引く）。
+async function notifyXCandidate(text) {
+  writeLog('scheduler', `X投稿候補\n${text}`);
+  if (!reportChannel) return;
+  const id  = pendingXPosts.create(text);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`xpost:${id}`)
+      .setLabel('𝕏 に投稿')
+      .setStyle(ButtonStyle.Primary)
+  );
+  await reportChannel.send({
+    content: `📝 **X投稿候補**\n\`\`\`\n${text}\n\`\`\``,
+    components: [row],
+  }).catch(() => {});
+}
+
 async function executeNav(schedule) {
+  const today = todayJST();
+  if (isJpHoliday(today)) {
+    writeLog('scheduler', `スキップ（祝日: ${today}）: ${schedule.name}`);
+    return;
+  }
   try {
     await notify(`▶ ${schedule.name} 開始`);
     const date   = dataFetcher.prevBusinessDayJST();
@@ -149,6 +179,12 @@ async function execute(schedule) {
   if (schedule.type === 'weekly') {
     return executeWeekly(schedule);
   }
+  const today = todayJST();
+  if (isJpHoliday(today)) {
+    writeLog('scheduler', `スキップ（祝日: ${today}）: ${schedule.name}`);
+    await notify(`⏸ ${schedule.name} スキップ（祝日: ${today}）`);
+    return;
+  }
   if (isRunning) {
     writeLog('scheduler', `スキップ（実行中）: ${schedule.name}`);
     return;
@@ -178,7 +214,7 @@ async function execute(schedule) {
     }
 
     if (result.article && !result.article.validationFailed) {
-      await notify(`📝 **X投稿候補**\n\`\`\`\n${result.article.x}\n\`\`\``);
+      await notifyXCandidate(result.article.x);
       const noteLines = result.article.note.split('\n');
       const preview   = noteLines.slice(0, 10).join('\n');
       await notify(`📄 **note記事（冒頭）**\n${preview.slice(0, 800)}`);
