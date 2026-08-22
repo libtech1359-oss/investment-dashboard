@@ -21,6 +21,7 @@ const { autoFixLayout } = require('../lib/articleAutoFix');
 const { runEditorReview } = require('../lib/editorReview');
 const { getDisplayCandidates } = require('../lib/candidateGroups');
 const { appendFailLog } = require('../lib/failArticleLog');
+const { checkXLength, enforceXLength } = require('../lib/xLength');
 const development = require('./development');
 
 // 下書きエディタURL（editor.note.com/notes/xxxxx）を公開後の記事URL（note.com/{account}/n/xxxxx）に変換する
@@ -177,28 +178,25 @@ X投稿は「記事の要約」ではなく、「AI会社の会議を覗き見�
 形式:
 
 [絵文字] [部署名]
-「[実際の主張を20字以内で簡潔に]」
+「[実際の主張を15字以内で簡潔に]」
 
 [絵文字] [部署名]
-「[実際の主張を20字以内で簡潔に]」
+「[実際の主張を15字以内で簡潔に]」
 
-④ 会議の結論を知りたくなる締め（疑問形1文）
-「会議の続き・結論が気になる」と思わせる疑問を1文だけ書く。
+④ 会議の結論を知りたくなる締め（疑問形1文、20字以内）
+「会議の続き・結論が気になる」と思わせる短い疑問を1文だけ書く。
 市場の解説や自分の意見は書かない。以下のような結論志向の問いにする:
-  ・「AI社員4部署はどんな議論を経て今日の結論を出したのか？」
-  ・「最終的にAI会社はどの判断を採用したのか？」
-  ・「会議ではどの部署の意見が採用されたのか？」
+  ・「今日の結論は？」
+  ・「どの部署の意見が採用された？」
+  ・「AI社員たちの結論は？」
 文言はその日の会議の流れに合わせて自由に変えてよい（毎回同じにしない）。
 結論・銘柄名・金額・判断ラベルは書かない。
 
-⑤ 固定フッター（この文章をそのまま使う）
-AI社員たちが市場データをどう分析し、どんな議論を経て結論を出したのかを毎日公開しています。
-
-続きはnote👇
+⑤ 固定フッター（この文章をそのまま使う。書き換え禁止）
+続きはnoteで👇
 [コンテキスト内の「【note URL】」に続くURLをそのまま貼る]
 
 #AI投資記録
-#AI観測プロジェクト
 
 【禁止事項】
 - 最終判断・買付銘柄・金額・シグナル名を書く
@@ -208,9 +206,11 @@ AI社員たちが市場データをどう分析し、どんな議論を経て結
 - 市場の解説・記事の要約
 - ②の選択肢で意味の重複した2行を並べる
 
-【制約】
-- 投稿全体は300文字以内
-- ハッシュタグは最後の2行にまとめて付ける
+【制約（最重要・必ず守ること）】
+- X（旧Twitter）は日本語中心の投稿だと実質140字程度までしか投稿できない（絵文字・記号込みで超過すると投稿自体が拒否される）
+- ①〜④の合計は80字以内に必ず収めること（⑤の固定フッターは別枠でこの文字数に含めない）
+- 迷ったら短く。削れる修飾語は全て削ること
+- ハッシュタグは⑤の1つのみ（他の場所に追加しない）
 
 【出力】
 投稿文のみ。ラベル・説明・番号・前置き一切不要。
@@ -1597,7 +1597,8 @@ async function publish(date) {
   let x = await ask(X_SYSTEM, xContext, { num_predict: 400, temperature: 0.6 });
   // 旧パターンラベル除去（互換）
   x = x.replace(/^パターン[A-Cａ-ｃ][\s\S]*?\n\n?/, '');
-  console.log(`[publisher] X投稿文生成完了 (${x.length}字)`);
+  x = enforceXLength(x);
+  console.log(`[publisher] X投稿文生成完了 (${x.length}字 / X加重長=${checkXLength(x).weightedLength})`);
 
   // グラフ埋め込みが2/2に満たない場合は、Validator FAIL等の他の失敗経路と同じ重みで
   // 「公開停止・要確認」として扱う（chartsIncompleteだけでは警告表示に留まっていたため

@@ -16,6 +16,7 @@
     "ollama": "^0.6.3",
     "playwright": "^1.61.0",
     "twitter-api-v2": "^1.29.1",
+    "twitter-text": "^3.1.0",
     "undici": "^7.0.0"
   }
 }
