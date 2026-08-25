@@ -56,4 +56,5 @@ module.exports = {
   topOfGroup,
   getDisplayCandidates,
   isAllowedAssetName,
+  namesMatch,
 };

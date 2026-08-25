@@ -107,18 +107,29 @@ async function run({ skipPublish = false, onProgress = null } = {}) {
   let article = null;
   if (!skipPublish) {
     notify('Step 5/5 記事生成（最終工程）...');
-    try {
-      article = await publisher.publish(date);
-      if (article?.validationFailed) {
-        const warningsText = (article.validationWarnings || []).join('\n\n');
-        notify(`❌ 【審査部】記事公開ブロック: 整合性チェック失敗（${article.validationWarnings.length}件）\n${warningsText}`);
-      } else if (article?.chartsIncomplete) {
-        notify(`❌ 【グラフ埋め込み】要確認: グラフ生成${article.graphsGenerated}/2 埋め込み${article.graphsEmbedded}/2（note記事 ${article.note.length}字・下書きは保存済み）`);
-      } else {
-        notify(`Step 5 完了: note記事 ${article.note.length}字`);
+    // Ollamaタイムアウト等の一過性障害を想定し、1回だけ自動リトライする（2026-08-24:
+    // プロセス自体はハングせずStep5だけが例外で失敗し、final_decisions確定済みにも
+    // 関わらずその日は記事が一切生成されずに終わっていたことが判明したため追加）。
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        article = await publisher.publish(date);
+        break;
+      } catch (err) {
+        if (attempt < 2) {
+          notify(`Step 5 失敗（${attempt}回目、30秒後に再試行）: ${err.message}`);
+          await new Promise(resolve => setTimeout(resolve, 30000));
+        } else {
+          notify(`Step 5 失敗（${attempt}回目・リトライ上限到達）: ${err.message}`);
+        }
       }
-    } catch (err) {
-      notify(`Step 5 失敗: ${err.message}`);
+    }
+    if (article?.validationFailed) {
+      const warningsText = (article.validationWarnings || []).join('\n\n');
+      notify(`❌ 【審査部】記事公開ブロック: 整合性チェック失敗（${article.validationWarnings.length}件）\n${warningsText}`);
+    } else if (article?.chartsIncomplete) {
+      notify(`❌ 【グラフ埋め込み】要確認: グラフ生成${article.graphsGenerated}/2 埋め込み${article.graphsEmbedded}/2（note記事 ${article.note.length}字・下書きは保存済み）`);
+    } else if (article) {
+      notify(`Step 5 完了: note記事 ${article.note.length}字`);
     }
   } else {
     notify('Step 5/5 記事生成スキップ（skipPublish=true）');

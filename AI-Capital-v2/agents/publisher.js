@@ -35,6 +35,13 @@ function toPublicNoteUrl(editorUrl) {
   return `https://note.com/${account}/n/${noteId}`;
 }
 
+// note記事の「タグ」欄に付けるハッシュタグ。固定3つ＋その日の対象銘柄名（あれば）。
+const FIXED_NOTE_TAGS = ['AI投資', '資産運用', 'AI Capital'];
+function buildNoteTags(decision) {
+  const asset = decision?.target_asset;
+  return asset && asset !== 'なし' ? [...FIXED_NOTE_TAGS, asset] : [...FIXED_NOTE_TAGS];
+}
+
 // 部署別の日替わり視点ローテーション（日付ベースの決定的選定 = 過去日再生成時も同じ結果になる）
 function pickRotation(dateStr, list) {
   const days = Math.floor(new Date(`${dateStr}T00:00:00Z`).getTime() / 86400000);
@@ -207,8 +214,8 @@ X投稿は「記事の要約」ではなく、「AI会社の会議を覗き見�
 - ②の選択肢で意味の重複した2行を並べる
 
 【制約（最重要・必ず守ること）】
-- X（旧Twitter）は日本語中心の投稿だと実質140字程度までしか投稿できない（絵文字・記号込みで超過すると投稿自体が拒否される）
-- ①〜④の合計は80字以内に必ず収めること（⑤の固定フッターは別枠でこの文字数に含めない）
+- X（旧Twitter）は日本語1文字を2としてカウントし、合計280を超えると投稿自体が拒否される（日本語なら実質140字程度が上限）
+- ①〜④の合計は110字以内に必ず収めること（⑤の固定フッターは別枠でこの文字数に含めない）
 - 迷ったら短く。削れる修飾語は全て削ること
 - ハッシュタグは⑤の1つのみ（他の場所に追加しない）
 
@@ -434,6 +441,35 @@ function buildRule33DataHint(recs, decision) {
     '間の橋渡しを一文で明示すること。「ただし」「それでも」「一方で」等の接続語を使い、なぜ他部署の提案' +
     'ではなくこの結論を支持するのかを、上記の実際の推奨内容（銘柄・金額・見送り）にのみ基づいて説明する' +
     'こと。上記に記載のない理由・数値を創作してはならない。'
+  );
+}
+
+// ── Rule34（📌今日の見どころでの結論先出し）修正用の具体指示 ──────────────
+// 2026-08-25追加: Rule34は「最終判断の対象銘柄名を見どころに書くな」という指摘だが、
+// 汎用の再生成プロンプト（警告文＋記事全文）ではモデルが禁止語を特定できず、6回再生成しても
+// 同じ銘柄名を書き続けて公開停止に至るケースが続いた。禁止する具体的な文字列と、
+// 銘柄名を使わずに対立軸を表現する言い換え例を明示する。
+function buildRule34Hint(decision, candidates) {
+  const finalAsset = decision?.target_asset || '';
+  if (!finalAsset || finalAsset === 'なし') return '';
+
+  // 短名・フルネームの両方を禁止語として列挙する（記事は「オール・カントリー（オルカン）」の
+  // ように別表記で書くことがあるため、候補行のフルネームも併せて示す）。
+  const cand = (candidates ?? []).find(c =>
+    c.asset_name === finalAsset || (c.full_name && c.full_name.includes(finalAsset))
+  );
+  const banned = [...new Set([finalAsset, cand?.full_name].filter(Boolean))];
+
+  return (
+    '【Rule34修正の具体指示（📌今日の見どころセクションのみを直すこと）】\n' +
+    `禁止語（📌今日の見どころ内で使用してはならない銘柄名）: ${banned.join(' / ')}\n` +
+    '📌今日の見どころ以外のセクション（🎯本日の買付候補・🏢各部署の判断・🔴本日の論点・⚖️最終判断など）では' +
+    'これらの銘柄名を今まで通り使ってよい。修正対象は📌今日の見どころの本文だけである。\n' +
+    '銘柄名を消したうえで、その日の対立軸を「性質」で言い換えること。言い換え例:\n' +
+    '・「高いモメンタムを取りに行くか、分散性を優先するか」\n' +
+    '・「成長資産に寄せるか、コア資産で守りを固めるか」\n' +
+    '・「買付金額をどこまで積むか、慎重派と買付派の温度差」\n' +
+    '記事の他の部分・文体・数値は一切変更しないこと。'
   );
 }
 
@@ -1030,6 +1066,26 @@ function applyPostProcessing(rawNote, ctx) {
   // 後処理⑰: ## / ### マーカーを除去（# 1個はタイトル行なので除外）
   note = note.replace(/^#{2,3}[ \t]*/gm, '');
 
+  // 後処理⑰a: 1行目（記事タイトル）以外に残った単独「#」見出しマーカーを除去
+  // （⑰は#1個をタイトル行として保護するため意図的に対象外にしているが、LLMが
+  // 「💰 AI Capital模擬ファンド」等の本文中の見出しにも単独#を付けてしまうことがあり、
+  // その場合はタイトルではないため除去する。読者フィードバックより2026-08-10追加）。
+  {
+    const noteLines0 = note.split('\n');
+    for (let i = 1; i < noteLines0.length; i++) {
+      if (/^#(?!📊)[ \t]*/.test(noteLines0[i])) {
+        noteLines0[i] = noteLines0[i].replace(/^#[ \t]*/, '');
+      }
+    }
+    note = noteLines0.join('\n');
+  }
+
+  // 後処理⑰a2: ▼HISTORY▼マーカー（後処理④で💰見出し直前に機械挿入・改行なし）に
+  // 「#」が直接連結され「▼HISTORY▼# 💰 AI Capital模擬ファンド」となるケースは、
+  // 上記⑰aの行頭判定では捕捉できないため、この特定パターンのみ個別に除去する
+  // （読者フィードバックより2026-08-10追加）。
+  note = note.replace(/#(\s*)(?=💰\s*AI Capital模擬ファンド)/g, '$1');
+
   // 後処理⑰b: --- 横線を除去（note.com でHRが表示される問題を防ぐ）
   note = note.replace(/^---[ \t]*$/gm, '');
 
@@ -1273,11 +1329,13 @@ async function publish(date) {
     // ② 機械修正で解決しない警告（内容・論理・部署整合性等）のみLLM再生成（最後の手段）
     console.log(`[publisher] LLM再生成 ${attempt}/${MAX_QUALITY_ATTEMPTS}回目（残り警告${validation.warnings.length}件）`);
     const hasRule33 = validation.warnings.some(w => /Rule 33/.test(w));
+    const hasRule34 = validation.warnings.some(w => /Rule 34/.test(w));
     const repairPrompt =
       `${context}\n\n` +
       '【前回生成した記事で以下の問題が検出されました。記事全体の内容・文体は維持しつつ、指摘箇所のみを修正して記事全文を出力してください】\n' +
       validation.warnings.join('\n\n') +
       (hasRule33 ? `\n\n${buildRule33DataHint(recs, decisions[0] ?? null)}` : '') +
+      (hasRule34 ? `\n\n${buildRule34Hint(decisions[0] ?? null, candidates)}` : '') +
       `\n\n【前回生成した記事全文（この内容をベースに指摘箇所のみ修正すること）】\n${note}`;
 
     // Ollamaタイムアウト・ネットワーク障害等で再生成そのものが失敗した場合、
@@ -1299,12 +1357,14 @@ async function publish(date) {
   if (!validation.ok) {
     console.warn(`[publisher] ${MAX_QUALITY_ATTEMPTS}回の品質改善サイクルを経ても警告が残っています（機械修正${mechanicalFixCount}回・LLM再生成${regenerationCount}回）。AI編集長による最終修正を試みます`);
     const hasRule33Rescue = validation.warnings.some(w => /Rule 33/.test(w));
+    const hasRule34Rescue = validation.warnings.some(w => /Rule 34/.test(w));
     const editorRescuePrompt =
       `${context}\n\n` +
       'あなたはAI Capitalの編集長です。以下の記事は品質チェックで指摘された問題が複数回の自動修正でも解消していません。' +
       '記事全体の内容・文体・部署コメント・数値は変更せず、指摘箇所のみを慎重に修正して記事全文を出力してください。\n\n' +
       validation.warnings.join('\n\n') +
       (hasRule33Rescue ? `\n\n${buildRule33DataHint(recs, decisions[0] ?? null)}` : '') +
+      (hasRule34Rescue ? `\n\n${buildRule34Hint(decisions[0] ?? null, candidates)}` : '') +
       `\n\n【前回生成した記事全文（この内容をベースに指摘箇所のみ修正すること）】\n${note}`;
     try {
       note = await generateArticle(editorRescuePrompt);
@@ -1560,15 +1620,24 @@ async function publish(date) {
   // マーカーを本文へ追記することで、noteDraft.jsの画像挿入が「no-marker」で失敗しないようにする。
   ensureMarkersPresent();
 
-  // note.com へ下書き保存（先に保存してURLを取得）
+  // note.com へ公開（グラフ埋め込みが2枚とも成功した場合のみ。片方でも失敗すれば
+  // saveDraft側の判断で下書き保存にフォールバックする）
   let noteUrl = null;
   let graphsEmbedded = 0;
+  let published = false;
   try {
-    const result = await saveDraft({ body: note, chartPath, historyChartPath, thumbPath });
+    const result = await saveDraft({
+      body: note, chartPath, historyChartPath, thumbPath,
+      publish: true, tags: buildNoteTags(decisions[0]),
+    });
     noteUrl = result.url;
+    published = result.published;
     graphsEmbedded = [result.historyEmbedded, result.chartEmbedded].filter(Boolean).length;
     console.log(`[publisher] Graphs Embedded : ${graphsEmbedded} / 2`);
-    console.log(`[publisher] note.com 下書き保存完了: ${noteUrl}`);
+    console.log(`[publisher] note.com ${published ? '公開' : '下書き保存'}完了: ${noteUrl}`);
+    if (!published && result.publishError) {
+      console.warn(`[publisher] 自動公開失敗のため下書きに留まっています: ${result.publishError}`);
+    }
     if (graphsEmbedded < 2) {
       console.error(`[publisher] グラフ埋め込みが${graphsEmbedded}/2枚のため要確認です（history:${result.historyEmbedded} chart:${result.chartEmbedded}）`);
       await development.saveDevelopmentLog({
@@ -1607,11 +1676,12 @@ async function publish(date) {
     note, x, date, noteUrl,
     validationFailed: graphsEmbedded < 2,
     chartsIncomplete: graphsEmbedded < 2,
+    published,
     graphsGenerated, graphsEmbedded,
   };
 }
 
 module.exports = {
   publish, buildContext, applyPostProcessing, injectRecommendations, injectRecommendationSummary,
-  buildRule33DataHint,
+  buildRule33DataHint, buildRule34Hint, X_SYSTEM, toPublicNoteUrl,
 };

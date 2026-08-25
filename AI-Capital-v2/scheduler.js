@@ -8,6 +8,7 @@ const capitalEvents = require('./lib/capitalEvents');
 const weekly        = require('./agents/weekly');
 const health        = require('./lib/health');
 const pendingXPosts = require('./lib/pendingXPosts');
+const xPoster       = require('./lib/xPoster');
 const { isJpHoliday } = require('./lib/jpHolidays');
 
 function todayJST() {
@@ -50,6 +51,19 @@ let isRunning     = false;
 async function notify(msg) {
   writeLog('scheduler', msg);
   if (reportChannel) await reportChannel.send(msg).catch(() => {});
+}
+
+// note公開が成功した場合にXへ即時自動投稿する。投稿自体が失敗した場合（レート制限等）は
+// note記事は既に公開済みで失うものがないため、従来通りDiscordボタンでの手動リトライへ委ねる。
+async function postXOrFallback(text) {
+  try {
+    const { url } = await xPoster.postTweet(text);
+    await notify(`✅ Xに自動投稿しました: ${url}`);
+  } catch (err) {
+    writeError('scheduler', err);
+    await notify(`⚠️ X自動投稿に失敗しました（${err.message}）。手動投稿用のボタンを送ります`);
+    await notifyXCandidate(text);
+  }
 }
 
 // X投稿候補を「𝕏に投稿」ボタン付きで通知する。ボタンのcustom_idは短いidのみ
@@ -213,19 +227,27 @@ async function execute(schedule) {
       );
     }
 
-    if (result.article && !result.article.validationFailed) {
+    if (result.article?.published) {
+      await postXOrFallback(result.article.x);
+      const noteLines = result.article.note.split('\n');
+      const preview   = noteLines.slice(0, 10).join('\n');
+      await notify(`📄 **note記事（公開済み）**\n${preview.slice(0, 800)}\n${result.article.noteUrl}`);
+    } else if (result.article && !result.article.validationFailed) {
+      // 内容は問題なかったが自動公開自体が失敗（note.com側UI変更・reCAPTCHA等）→ 下書きのまま人の確認を促す
       await notifyXCandidate(result.article.x);
       const noteLines = result.article.note.split('\n');
       const preview   = noteLines.slice(0, 10).join('\n');
-      await notify(`📄 **note記事（冒頭）**\n${preview.slice(0, 800)}`);
+      await notify(`⚠️ **自動公開に失敗したため下書きのみ保存されています。note.comで手動公開してください**\n${result.article.noteUrl}\n\n📄 記事冒頭\n${preview.slice(0, 800)}`);
     }
 
-    if (result.article?.validationFailed) {
+    if (!schedule.skipPublish && !result.article) {
+      await notify(`❌ ${schedule.name} 完了（記事生成に失敗・要確認。\`/v2-article\` で手動再生成してください）`);
+    } else if (result.article?.validationFailed) {
       await notify(`⚠️ ${schedule.name} 完了（記事は整合性チェック失敗のため未公開）`);
-    } else if (result.article?.chartsIncomplete) {
-      await notify(`⚠️ ${schedule.name} 完了（グラフ埋め込み${result.article.graphsEmbedded}/2枚・要確認）`);
+    } else if (result.article && !result.article.published) {
+      await notify(`⚠️ ${schedule.name} 完了（自動公開失敗・下書きのみ・要手動公開）`);
     } else {
-      await notify(`✅ ${schedule.name} 完了`);
+      await notify(`✅ ${schedule.name} 完了（公開済み）`);
     }
   } catch (err) {
     writeError('scheduler', err);

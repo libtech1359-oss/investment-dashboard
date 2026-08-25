@@ -1,6 +1,6 @@
 'use strict';
 
-const { getDisplayCandidates } = require('./candidateGroups');
+const { getDisplayCandidates, namesMatch } = require('./candidateGroups');
 
 /**
  * articleValidator.js — 公開前記事整合性監査
@@ -23,7 +23,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
 
   const decision    = decisions?.[0] ?? null;
   const finalSignal = decision?.final_signal ?? '';
-  const finalAsset  = decision?.target_asset ?? 'なし';
+  const finalAsset  = decision?.target_asset || 'なし';
   const finalAmount = parseInt(decision?.amount ?? 0);
   const isBuySignal = ['BUY', 'ACCUMULATE'].includes(finalSignal);
 
@@ -974,9 +974,22 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
       // 「推奨：」行（機械挿入・正しい）より前の自由記述部分のみを対象とする
       const summaryOnly = body.split(/推奨[：:]/)[0];
 
+      // 2026-08-25修正: 部署推奨はフルネーム（例「ニッセイNASDAQ100インデックスファンド」）で
+      // 保存される一方、candidate_assets.asset_name は短名（例「NASDAQ100」）のため、
+      // 単純な !== 比較だと同一銘柄の短名が「別資産」に混入し、記事中の正しい記述
+      // （「NASDAQ100インデックスファンドを提案します」）を誤検知していた。
+      // 自身の推奨銘柄に双方向部分一致する名前（短名・フルネーム）は比較対象から除外する。
+      const ownAliases = [asset];
+      for (const c of (candidates ?? [])) {
+        if (namesMatch(asset, c.asset_name) || namesMatch(asset, c.full_name)) {
+          if (c.asset_name) ownAliases.push(c.asset_name);
+          if (c.full_name)  ownAliases.push(c.full_name);
+        }
+      }
+
       const otherAssetNames = (candidates ?? [])
         .map(c => c.asset_name)
-        .filter(name => name && name !== asset);
+        .filter(name => name && !ownAliases.some(own => namesMatch(name, own)));
 
       for (const otherName of otherAssetNames) {
         const re = new RegExp(`${escapeRegExp(otherName)}[^。\\n]{0,15}${PROPOSE_VERB}`);

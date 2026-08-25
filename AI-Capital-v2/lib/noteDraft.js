@@ -281,13 +281,78 @@ async function insertViaHtml(page, text) {
 }
 
 /**
- * note.com に下書き保存する
- * @param {{ title?: string, body: string, thumbPath?: string, historyChartPath?: string, chartPath?: string }} opts
- * @returns {{ success: boolean, url: string, historyEmbedded: boolean, chartEmbedded: boolean }}
- *   historyEmbedded/chartEmbedded は対応するimagePathが渡され、実際にnote.comのProseMirror内へ
- *   画像挿入できた場合のみtrue（Graphs Embedded集計に使用）。
+ * 「公開に進む」パネルへ遷移し、タグを入力して「投稿する」まで自動で行う。
+ * note.com側のUI変更・reCAPTCHA等で失敗した場合は例外を投げる（呼び出し元が
+ * 下書き保存へフォールバックする前提）。2026-08-24にヘッドレスで動作確認済みの
+ * セレクタを使用しているが、実際に「投稿する」を最後まで押す検証はまだ行っていない
+ * （テスト目的で実記事を公開するわけにいかないため）。
  */
-async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath }) {
+async function publishArticle(page, tags) {
+  const proceedBtn = page.locator('button:has-text("公開に進む")').first();
+  await proceedBtn.waitFor({ state: 'visible', timeout: 10000 });
+  await proceedBtn.click();
+  await page.waitForTimeout(2000);
+
+  if (tags && tags.length > 0) {
+    const tagInput = page.locator('input[placeholder="ハッシュタグを追加する"]').first();
+    await tagInput.waitFor({ state: 'visible', timeout: 10000 });
+    for (const tag of tags) {
+      await tagInput.click();
+      await tagInput.type(tag);
+      await page.waitForTimeout(400);
+      await tagInput.press('Enter');
+      await page.waitForTimeout(400);
+    }
+  }
+
+  const postBtn = page.locator('button:has-text("投稿する")').first();
+  await postBtn.waitFor({ state: 'visible', timeout: 10000 });
+  await postBtn.click();
+  await page.waitForTimeout(1500);
+
+  // 確認ダイアログが追加で出るケースへの保険（未確認のUIパターン）
+  const confirmBtn = page.locator('button:has-text("OK"), button:has-text("公開する"), button:has-text("はい")').first();
+  if (await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+    await confirmBtn.click();
+  }
+
+  // 2026-08-24判明: 公開後は note.com/{account}/n/{id} へ遷移すると想定していたが、実際は
+  // editor.note.com 上に留まったまま「記事が公開されました」の完了モーダルが表示されるだけ
+  // だった。旧実装はpage.waitForURL()のタイムアウトを握りつぶした上でURL形式チェックに
+  // かかって「公開失敗」として例外を投げていたが、投稿自体は実際には成功していた
+  // （note.com上で確認済み）。URL遷移ではなく完了モーダルの出現で成否を判定する。
+  const publishedModal = page.locator('text=記事が公開されました').first();
+  const success = await publishedModal
+    .waitFor({ state: 'visible', timeout: 20000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!success) {
+    throw new Error(`公開完了モーダルが表示されませんでした（現在URL: ${page.url()}）`);
+  }
+
+  // editor.note.com/notes/{id}/publish/ 形式の現在URLからnoteIdを抽出し、
+  // 公開後の記事URL（note.com/{account}/n/{id}）を構築する（IDはeditor URLと共通）。
+  const m = page.url().match(/\/notes\/([a-zA-Z0-9]+)/);
+  const noteId  = m ? m[1] : null;
+  const account = process.env.NOTE_ID;
+  if (!noteId || !account) {
+    throw new Error(`公開URLの構築に失敗しました（noteId=${noteId}, account=${account}）`);
+  }
+  return `https://note.com/${account}/n/${noteId}`;
+}
+
+/**
+ * note.com に下書き保存、または公開まで行う
+ * @param {{ title?: string, body: string, thumbPath?: string, historyChartPath?: string, chartPath?: string,
+ *   publish?: boolean, tags?: string[] }} opts
+ *   publish=true でもグラフ埋め込みが2枚とも成功しなかった場合は下書き保存にフォールバックする。
+ * @returns {{ success: boolean, url: string, historyEmbedded: boolean, chartEmbedded: boolean,
+ *   published: boolean, publishError: string|null }}
+ *   historyEmbedded/chartEmbedded は対応するimagePathが渡され、実際にnote.comのProseMirror内へ
+ *   画像挿入できた場合のみtrue（Graphs Embedded集計に使用）。published=falseの場合、urlは下書きの
+ *   編集URL（本人以外アクセス不可）。
+ */
+async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath, publish = false, tags = [] }) {
   const { chromium } = require('playwright');
 
   if (!fs.existsSync(SESSION_FILE)) {
@@ -377,34 +442,64 @@ async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath }
 
     await closeCropModalIfOpen(page);
 
-    // 下書き保存
-    log('下書き保存ボタンをクリック');
-    const saveBtnLocator = page.locator([
-      'button:has-text("下書き保存")',
-      'button:has-text("下書きに保存")',
-      '[aria-label="下書き保存"]',
-    ].join(', ')).first();
-
+    // グラフが両方きちんと埋め込めた場合のみ「公開に進む」を試みる。片方でも埋め込みに
+    // 失敗していれば、publish=trueが渡されていても下書き保存にフォールバックする
+    // （embed成否はここまでの処理結果でしか判定できないため、呼び出し元では判断できない）。
     let finalUrl;
-    try {
-      await saveBtnLocator.waitFor({ state: 'visible', timeout: 10000 });
-      await saveBtnLocator.click();
-      await page.waitForTimeout(3000);
-      finalUrl = page.url();
-      log(`下書き保存完了: ${finalUrl}`);
-    } catch (_) {
-      finalUrl = page.url();
-      if (!finalUrl.includes('/new') && finalUrl.includes('note.com')) {
-        log(`auto-saved とみなす (URL: ${finalUrl})`);
-      } else {
-        throw new Error(`下書き保存ボタン未検出 (URL: ${finalUrl})`);
+    let published = false;
+    let publishError = null;
+
+    if (publish && historyEmbedded && chartEmbedded) {
+      try {
+        finalUrl = await publishArticle(page, tags);
+        published = true;
+        log(`公開完了: ${finalUrl}`);
+      } catch (err) {
+        publishError = err.message;
+        log(`公開失敗のため下書き保存にフォールバックします: ${err.message}`);
+        try {
+          const dbgPath = path.join(__dirname, '../data/note_publish_debug.png');
+          await page.screenshot({ path: dbgPath, fullPage: true });
+          log(`公開失敗デバッグスクリーンショット: ${dbgPath}`);
+        } catch (_) {}
+        // 公開設定パネルが開いたままの場合はエディタへ戻す
+        const cancelBtn = page.locator('button:has-text("キャンセル")').first();
+        if (await cancelBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await cancelBtn.click();
+          await page.waitForTimeout(1000);
+        }
+      }
+    }
+
+    if (!published) {
+      // 下書き保存
+      log('下書き保存ボタンをクリック');
+      const saveBtnLocator = page.locator([
+        'button:has-text("下書き保存")',
+        'button:has-text("下書きに保存")',
+        '[aria-label="下書き保存"]',
+      ].join(', ')).first();
+
+      try {
+        await saveBtnLocator.waitFor({ state: 'visible', timeout: 10000 });
+        await saveBtnLocator.click();
+        await page.waitForTimeout(3000);
+        finalUrl = page.url();
+        log(`下書き保存完了: ${finalUrl}`);
+      } catch (_) {
+        finalUrl = page.url();
+        if (!finalUrl.includes('/new') && finalUrl.includes('note.com')) {
+          log(`auto-saved とみなす (URL: ${finalUrl})`);
+        } else {
+          throw new Error(`下書き保存ボタン未検出 (URL: ${finalUrl})`);
+        }
       }
     }
 
     await context.storageState({ path: SESSION_FILE });
     // historyEmbedded/chartEmbedded: 対応するchartPathが渡されなかった場合はinsertImage()が
     // false（画像なし→マーカー除去のみ）を返す。呼び出し元は渡したパスの有無と合わせて判定すること。
-    return { success: true, url: finalUrl, historyEmbedded, chartEmbedded };
+    return { success: true, url: finalUrl, historyEmbedded, chartEmbedded, published, publishError };
 
   } catch (err) {
     try {

@@ -86,21 +86,21 @@ async function attemptStaleArticleRecovery(hb, reportChannel) {
     }
 
     const article = await publisher.publish(date);
+    const xReply = await buildXPostReply(article);
     const lines = [
       `🔁 **中断された記事を自動リトライしました** (${date})`,
       '',
       article.validationFailed
         ? '⚠️ 整合性チェック未通過・要確認（下書きのみ保存、公開は見送り）'
-        : '✅ Validator PASS',
+        : article.published ? '✅ 公開完了' : '⚠️ 自動公開失敗（下書きのみ・要手動公開）',
       '',
-      article.noteUrl ? `**note下書き**: ${article.noteUrl}` : '',
+      article.noteUrl ? `**note${article.published ? '記事' : '下書き'}**: ${article.noteUrl}` : '',
       article.fallbackDraftUrl ? `**note下書き（フォールバック）**: ${article.fallbackDraftUrl}` : '',
-      article.x ? `**X投稿候補**:\n${article.x}` : '',
+      xReply.line,
     ].filter(l => l !== undefined && l !== '');
 
     if (reportChannel) {
-      const components = article.x ? [xPostButtonRow(article.x)] : [];
-      await reportChannel.send({ content: lines.join('\n').slice(0, 1900), components }).catch(() => {});
+      await reportChannel.send({ content: lines.join('\n').slice(0, 1900), components: xReply.components }).catch(() => {});
     }
   } catch (err) {
     console.error('[startup] 記事自動リトライ失敗:', err.message);
@@ -139,6 +139,26 @@ function xPostButtonRow(text) {
   );
 }
 
+// note公開が成功している場合はXへ即時自動投稿する。未公開（下書きのみ）の場合や
+// 自動投稿自体が失敗した場合は、従来通り手動投稿ボタンを返す。
+// @returns {{ line: string, components: object[] }}
+async function buildXPostReply(article) {
+  if (!article?.x) return { line: '', components: [] };
+  if (article.published) {
+    try {
+      const { url } = await xPoster.postTweet(article.x);
+      return { line: `**X投稿**: ✅ 自動投稿しました ${url}`, components: [] };
+    } catch (err) {
+      console.error('[ERROR] X自動投稿失敗:', err.message);
+      return {
+        line: `**X投稿**: ⚠️ 自動投稿失敗（${err.message}）。下のボタンで手動投稿できます`,
+        components: [xPostButtonRow(article.x)],
+      };
+    }
+  }
+  return { line: `**X投稿候補**:\n${article.x}`, components: [xPostButtonRow(article.x)] };
+}
+
 // ── スラッシュコマンドハンドラー ────────────────────────────
 
 async function handleV2Run(interaction) {
@@ -154,18 +174,18 @@ async function handleV2Run(interaction) {
     });
 
     const d = result.finalDecision;
+    const xReply = await buildXPostReply(result.article);
     const lines = [
       `✅ **AI Capital v2 実行完了** ${result.date}`,
       '',
       d ? `**最終判断**: ${d.final_signal}${d.target_asset ? ` | ${d.target_asset}` : ''}${d.amount ? ` | ¥${parseInt(d.amount).toLocaleString()}` : ''}` : '最終判断: なし',
       result.order ? `**発注記録**: \`${result.order.order_id}\` ${result.order.asset_name} ¥${parseInt(result.order.amount).toLocaleString()}` : '発注: なし',
       '',
-      result.article?.noteUrl ? `**note下書き**: ${result.article.noteUrl}` : '',
-      result.article ? `**X投稿候補**:\n${result.article.x}` : '',
+      result.article?.noteUrl ? `**note${result.article.published ? '記事' : '下書き'}**: ${result.article.noteUrl}` : '',
+      xReply.line,
     ].filter(l => l !== undefined);
 
-    const components = result.article?.x ? [xPostButtonRow(result.article.x)] : [];
-    await interaction.editReply({ content: lines.join('\n').slice(0, 1900), components });
+    await interaction.editReply({ content: lines.join('\n').slice(0, 1900), components: xReply.components });
   } catch (err) {
     await interaction.editReply(`❌ エラー: ${err.message}`);
   }
@@ -184,21 +204,22 @@ async function handleV2Article(interaction) {
 
   try {
     const article = await publisher.publish(date);
+    const xReply = await buildXPostReply(article);
     const lines = [
       `**記事再生成完了** ${date}`,
       '',
       article.validationFailed
-        ? '⚠️ 整合性チェック未通過・要確認（下書きのみ保存、公開は見送り）'
-        : '✅ Validator PASS',
-      article.chartsIncomplete ? `⚠️ グラフ埋め込み ${article.graphsEmbedded ?? 0}/2 枚（要確認）` : '',
+        ? (article.chartsIncomplete
+          ? `⚠️ グラフ埋め込み ${article.graphsEmbedded ?? 0}/2 枚のため未公開（下書きのみ保存）`
+          : '⚠️ 整合性チェック未通過・要確認（下書きのみ保存、公開は見送り）')
+        : article.published ? '✅ 公開完了' : '⚠️ 自動公開失敗（下書きのみ・要手動公開）',
       '',
-      article.noteUrl ? `**note下書き**: ${article.noteUrl}` : '',
+      article.noteUrl ? `**note${article.published ? '記事' : '下書き'}**: ${article.noteUrl}` : '',
       article.fallbackDraftUrl ? `**note下書き（フォールバック）**: ${article.fallbackDraftUrl}` : '',
-      article.x ? `**X投稿候補**:\n${article.x}` : '',
+      xReply.line,
     ].filter(l => l !== undefined);
 
-    const components = article.x ? [xPostButtonRow(article.x)] : [];
-    await interaction.editReply({ content: lines.join('\n').slice(0, 1900), components });
+    await interaction.editReply({ content: lines.join('\n').slice(0, 1900), components: xReply.components });
   } catch (err) {
     await interaction.editReply(`❌ エラー: ${err.message}`);
   }
