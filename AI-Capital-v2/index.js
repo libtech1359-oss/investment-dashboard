@@ -22,7 +22,7 @@ const PID_FILE = path.join(__dirname, '.pid');
   process.on('SIGTERM', () => process.exit(0));
 })();
 
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const scheduler   = require('./scheduler');
 const secretary   = require('./secretary');
 const publisher   = require('./agents/publisher');
@@ -30,8 +30,7 @@ const weekly      = require('./agents/weekly');
 const sheets      = require('./lib/sheets');
 const orderManager = require('./lib/orderManager');
 const health      = require('./lib/health');
-const pendingXPosts = require('./lib/pendingXPosts');
-const xPoster     = require('./lib/xPoster');
+const xIntent     = require('./lib/xIntent');
 
 const { DISCORD_TOKEN, CEO_CHANNEL = 'ai-v2秘書' } = process.env;
 if (!DISCORD_TOKEN) { console.error('❌ DISCORD_TOKEN 未設定'); process.exit(1); }
@@ -86,7 +85,7 @@ async function attemptStaleArticleRecovery(hb, reportChannel) {
     }
 
     const article = await publisher.publish(date);
-    const xReply = await buildXPostReply(article);
+    const xReply = buildXPostReply(article);
     const lines = [
       `🔁 **中断された記事を自動リトライしました** (${date})`,
       '',
@@ -96,11 +95,12 @@ async function attemptStaleArticleRecovery(hb, reportChannel) {
       '',
       article.noteUrl ? `**note${article.published ? '記事' : '下書き'}**: ${article.noteUrl}` : '',
       article.fallbackDraftUrl ? `**note下書き（フォールバック）**: ${article.fallbackDraftUrl}` : '',
-      xReply.line,
+      xReply.block,
     ].filter(l => l !== undefined && l !== '');
 
     if (reportChannel) {
-      await reportChannel.send({ content: lines.join('\n').slice(0, 1900), components: xReply.components }).catch(() => {});
+      await reportChannel.send({ content: lines.join('\n').slice(0, 1900) }).catch(() => {});
+      if (xReply.intentLine) await reportChannel.send({ content: xReply.intentLine }).catch(() => {});
     }
   } catch (err) {
     console.error('[startup] 記事自動リトライ失敗:', err.message);
@@ -127,36 +127,17 @@ function splitMessage(text, maxLen = 1900) {
   return chunks;
 }
 
-// X投稿候補用の「𝕏に投稿」ボタン行を作る（本文はpendingXPosts.jsに保存し、
-// customIdには短いidのみ埋め込む。scheduler.jsのnotifyXCandidate()と同じ仕組み）。
-function xPostButtonRow(text) {
-  const id = pendingXPosts.create(text);
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`xpost:${id}`)
-      .setLabel('𝕏 に投稿')
-      .setStyle(ButtonStyle.Primary)
-  );
-}
-
-// note公開が成功している場合はXへ即時自動投稿する。未公開（下書きのみ）の場合や
-// 自動投稿自体が失敗した場合は、従来通り手動投稿ボタンを返す。
-// @returns {{ line: string, components: object[] }}
-async function buildXPostReply(article) {
-  if (!article?.x) return { line: '', components: [] };
-  if (article.published) {
-    try {
-      const { url } = await xPoster.postTweet(article.x);
-      return { line: `**X投稿**: ✅ 自動投稿しました ${url}`, components: [] };
-    } catch (err) {
-      console.error('[ERROR] X自動投稿失敗:', err.message);
-      return {
-        line: `**X投稿**: ⚠️ 自動投稿失敗（${err.message}）。下のボタンで手動投稿できます`,
-        components: [xPostButtonRow(article.x)],
-      };
-    }
-  }
-  return { line: `**X投稿候補**:\n${article.x}`, components: [xPostButtonRow(article.x)] };
+// X投稿候補を返す。X APIの自動投稿は2026-08-26以降402で使えなくなったため
+// （[[lib/xIntent.js]]参照）、「リンクを1タップ → Xの投稿画面が本文プリセット済みで
+// 開く」運用に統一した。
+//   block: 予告編テキストのコードブロック（他の情報と同じメッセージに畳んでOK）
+//   intentLine: ワンタップ投稿リンクの行（長すぎる場合 null）。別メッセージで送る。
+function buildXPostReply(article) {
+  if (!article?.x) return { block: '', intentLine: null };
+  return {
+    block:      xIntent.buildTextBlock(article.x),
+    intentLine: xIntent.buildIntentLine(article.x),
+  };
 }
 
 // ── スラッシュコマンドハンドラー ────────────────────────────
@@ -174,7 +155,7 @@ async function handleV2Run(interaction) {
     });
 
     const d = result.finalDecision;
-    const xReply = await buildXPostReply(result.article);
+    const xReply = buildXPostReply(result.article);
     const lines = [
       `✅ **AI Capital v2 実行完了** ${result.date}`,
       '',
@@ -182,10 +163,11 @@ async function handleV2Run(interaction) {
       result.order ? `**発注記録**: \`${result.order.order_id}\` ${result.order.asset_name} ¥${parseInt(result.order.amount).toLocaleString()}` : '発注: なし',
       '',
       result.article?.noteUrl ? `**note${result.article.published ? '記事' : '下書き'}**: ${result.article.noteUrl}` : '',
-      xReply.line,
-    ].filter(l => l !== undefined);
+      xReply.block,
+    ].filter(l => l !== undefined && l !== '');
 
-    await interaction.editReply({ content: lines.join('\n').slice(0, 1900), components: xReply.components });
+    await interaction.editReply({ content: lines.join('\n').slice(0, 1900) });
+    if (xReply.intentLine) await interaction.followUp({ content: xReply.intentLine, flags: 64 }).catch(() => {});
   } catch (err) {
     await interaction.editReply(`❌ エラー: ${err.message}`);
   }
@@ -204,7 +186,7 @@ async function handleV2Article(interaction) {
 
   try {
     const article = await publisher.publish(date);
-    const xReply = await buildXPostReply(article);
+    const xReply = buildXPostReply(article);
     const lines = [
       `**記事再生成完了** ${date}`,
       '',
@@ -216,10 +198,11 @@ async function handleV2Article(interaction) {
       '',
       article.noteUrl ? `**note${article.published ? '記事' : '下書き'}**: ${article.noteUrl}` : '',
       article.fallbackDraftUrl ? `**note下書き（フォールバック）**: ${article.fallbackDraftUrl}` : '',
-      xReply.line,
-    ].filter(l => l !== undefined);
+      xReply.block,
+    ].filter(l => l !== undefined && l !== '');
 
-    await interaction.editReply({ content: lines.join('\n').slice(0, 1900), components: xReply.components });
+    await interaction.editReply({ content: lines.join('\n').slice(0, 1900) });
+    if (xReply.intentLine) await interaction.followUp({ content: xReply.intentLine, flags: 64 }).catch(() => {});
   } catch (err) {
     await interaction.editReply(`❌ エラー: ${err.message}`);
   }
@@ -370,42 +353,6 @@ async function handleV2Orders(interaction) {
   }
 }
 
-// 「𝕏に投稿」ボタン押下時のハンドラー。custom_id (`xpost:<id>`) から
-// pendingXPosts.jsに保存済みの本文を引いてX APIへ投稿し、元メッセージの
-// ボタンを「投稿済み」表示に差し替える。
-async function handleXPostButton(interaction) {
-  const id = interaction.customId.slice('xpost:'.length);
-  await interaction.deferReply({ flags: 64 });
-
-  const entry = pendingXPosts.get(id);
-  if (!entry) {
-    await interaction.editReply('⚠️ この投稿候補は見つかりません（期限切れの可能性があります）');
-    return;
-  }
-  if (entry.status === 'posted') {
-    await interaction.editReply(`ℹ️ 既に投稿済みです: ${entry.tweetUrl}`);
-    return;
-  }
-
-  try {
-    const { url } = await xPoster.postTweet(entry.text);
-    pendingXPosts.markPosted(id, url);
-    await interaction.editReply(`✅ Xに投稿しました: ${url}`);
-
-    const postedRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`xpost:${id}`)
-        .setLabel('✅ 投稿済み')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(true)
-    );
-    await interaction.message.edit({ components: [postedRow] }).catch(() => {});
-  } catch (err) {
-    console.error('[ERROR] xpost button:', err.message);
-    await interaction.editReply(`❌ 投稿失敗: ${err.message}`);
-  }
-}
-
 // ── コマンドテーブル ──────────────────────────────────────
 const SLASH_HANDLERS = {
   'v2-run':             handleV2Run,
@@ -459,18 +406,6 @@ client.once('clientReady', () => {
 });
 
 client.on('interactionCreate', async interaction => {
-  if (interaction.isButton() && interaction.customId.startsWith('xpost:')) {
-    try {
-      await handleXPostButton(interaction);
-    } catch (err) {
-      console.error('[ERROR] xpost button:', err.message);
-      const msg = { content: `❌ エラー: ${err.message}`, flags: 64 };
-      if (interaction.deferred || interaction.replied) await interaction.editReply(msg).catch(() => {});
-      else await interaction.reply(msg).catch(() => {});
-    }
-    return;
-  }
-
   if (!interaction.isChatInputCommand()) return;
   const handler = SLASH_HANDLERS[interaction.commandName];
   if (!handler) return;

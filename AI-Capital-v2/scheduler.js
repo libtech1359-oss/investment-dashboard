@@ -1,14 +1,12 @@
 'use strict';
 
 const cron          = require('node-cron');
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const secretary     = require('./secretary');
 const dataFetcher   = require('./lib/dataFetcher');
 const capitalEvents = require('./lib/capitalEvents');
 const weekly        = require('./agents/weekly');
 const health        = require('./lib/health');
-const pendingXPosts = require('./lib/pendingXPosts');
-const xPoster       = require('./lib/xPoster');
+const xIntent       = require('./lib/xIntent');
 const { isJpHoliday } = require('./lib/jpHolidays');
 
 function todayJST() {
@@ -53,34 +51,14 @@ async function notify(msg) {
   if (reportChannel) await reportChannel.send(msg).catch(() => {});
 }
 
-// note公開が成功した場合にXへ即時自動投稿する。投稿自体が失敗した場合（レート制限等）は
-// note記事は既に公開済みで失うものがないため、従来通りDiscordボタンでの手動リトライへ委ねる。
-async function postXOrFallback(text) {
-  try {
-    const { url } = await xPoster.postTweet(text);
-    await notify(`✅ Xに自動投稿しました: ${url}`);
-  } catch (err) {
-    writeError('scheduler', err);
-    await notify(`⚠️ X自動投稿に失敗しました（${err.message}）。手動投稿用のボタンを送ります`);
-    await notifyXCandidate(text);
-  }
-}
-
-// X投稿候補を「𝕏に投稿」ボタン付きで通知する。ボタンのcustom_idは短いidのみ
-// （本文はpendingXPosts.jsに保存し、index.jsのボタンハンドラがidから引く）。
+// X投稿候補をWeb Intentリンク付きで通知する。
+// X APIの自動投稿は2026-08-26以降402で使えなくなったため（[[lib/xIntent.js]]参照）、
+// 「予告編テキスト入りでXの投稿画面が開くリンク」を1タップ踏む運用に統一した。
 async function notifyXCandidate(text) {
   writeLog('scheduler', `X投稿候補\n${text}`);
   if (!reportChannel) return;
-  const id  = pendingXPosts.create(text);
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`xpost:${id}`)
-      .setLabel('𝕏 に投稿')
-      .setStyle(ButtonStyle.Primary)
-  );
   await reportChannel.send({
-    content: `📝 **X投稿候補**\n\`\`\`\n${text}\n\`\`\``,
-    components: [row],
+    content: xIntent.buildCandidateMessage(text),
   }).catch(() => {});
 }
 
@@ -228,7 +206,7 @@ async function execute(schedule) {
     }
 
     if (result.article?.published) {
-      await postXOrFallback(result.article.x);
+      await notifyXCandidate(result.article.x);
       const noteLines = result.article.note.split('\n');
       const preview   = noteLines.slice(0, 10).join('\n');
       await notify(`📄 **note記事（公開済み）**\n${preview.slice(0, 800)}\n${result.article.noteUrl}`);
