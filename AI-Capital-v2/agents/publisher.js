@@ -1499,6 +1499,7 @@ async function publish(date) {
         validationFailed: true,
         editorRejected: true,
         editorReview,
+        validationWarnings: validation.warnings,
         qualityScore: qualityResult.score,
         fallbackDraftUrl,
       };
@@ -1527,6 +1528,7 @@ async function publish(date) {
     return {
       note, x: '', date, noteUrl: null,
       validationFailed: true,
+      validationWarnings: validation.warnings,
       qualityScore: qualityResult.score,
       fallbackDraftUrl,
     };
@@ -1610,6 +1612,7 @@ async function publish(date) {
     return {
       note, x: '', date, noteUrl: null,
       validationFailed: true, chartsIncomplete: true,
+      validationWarnings: validation.warnings,
       graphsGenerated, graphsEmbedded: 0,
       fallbackDraftUrl,
     };

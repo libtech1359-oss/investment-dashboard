@@ -123,13 +123,20 @@ async function run({ skipPublish = false, onProgress = null } = {}) {
         }
       }
     }
-    if (article?.validationFailed) {
-      const warningsText = (article.validationWarnings || []).join('\n\n');
-      notify(`❌ 【審査部】記事公開ブロック: 整合性チェック失敗（${article.validationWarnings.length}件）\n${warningsText}`);
+    // 公開ブロックの種類ごとに通知を分ける。返却オブジェクトに一部フィールドが
+    // 欠けていても落ちないよう、すべて null 安全に参照する（2026-09-03: 編集長REJECT時に
+    // validationWarnings が未定義で `.length` 参照が TypeError を投げ、日刊会議が
+    // 「Cannot read properties of undefined (reading 'length')」で失敗していた不具合を修正）。
+    if (article?.editorRejected) {
+      const reasons = (article.editorReview?.reasons || []).map(r => `・${r}`).join('\n');
+      notify(`❌ 【AI編集長】公開見送り（記事は生成済み・下書きのみ保存）\n${reasons || '（理由未取得）'}`);
     } else if (article?.chartsIncomplete) {
-      notify(`❌ 【グラフ埋め込み】要確認: グラフ生成${article.graphsGenerated}/2 埋め込み${article.graphsEmbedded}/2（note記事 ${article.note.length}字・下書きは保存済み）`);
+      notify(`❌ 【グラフ埋め込み】要確認: グラフ生成${article.graphsGenerated}/2 埋め込み${article.graphsEmbedded ?? 0}/2（note記事 ${article.note?.length ?? 0}字・下書きは保存済み）`);
+    } else if (article?.validationFailed) {
+      const warnings = article.validationWarnings || [];
+      notify(`❌ 【審査部】記事公開ブロック: 整合性チェック失敗（${warnings.length}件）\n${warnings.join('\n\n')}`);
     } else if (article) {
-      notify(`Step 5 完了: note記事 ${article.note.length}字`);
+      notify(`Step 5 完了: note記事 ${article.note?.length ?? 0}字`);
     }
   } else {
     notify('Step 5/5 記事生成スキップ（skipPublish=true）');
