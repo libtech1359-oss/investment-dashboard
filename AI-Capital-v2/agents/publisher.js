@@ -23,6 +23,7 @@ const { getDisplayCandidates } = require('../lib/candidateGroups');
 const { appendFailLog } = require('../lib/failArticleLog');
 const { checkXLength, enforceXLength } = require('../lib/xLength');
 const development = require('./development');
+const financeStrategy = require('../config/financeStrategy'); // 財務戦略部（財前ミナ）記事登場ゲート
 
 // 下書きエディタURL（editor.note.com/notes/xxxxx）を公開後の記事URL（note.com/{account}/n/xxxxx）に変換する
 // note.comはID自体を下書き作成時に払い出すため、公開してもIDは変わらずドメイン/パスのみ変わる
@@ -138,12 +139,17 @@ const DEPT_TO_CHARACTER = {
 
 // その日実際に agent_recommendations へ登場した部署の character キー一覧を返す。
 // 相沢レイは常に含める。recs が空/対応不明な場合は安全側で全部署を含める（既存の完全ロールバック相当の動作）。
-function computeActiveCharacters(recs) {
+// 財前ミナ（minae）は投票部署ではないため recs には現れない。financeShow=true の日だけ加える
+// （false の日は、recs 空フォールバックで ALL_CHARACTERS に混ざっても必ず取り除く）。
+function computeActiveCharacters(recs, financeShow = false) {
   const fromRecs = [...new Set(
     (recs || []).map(r => DEPT_TO_CHARACTER[r.department]).filter(Boolean)
   )];
-  if (fromRecs.length === 0) return ALL_CHARACTERS;
-  return [...new Set([...fromRecs, 'rei'])];
+  const base = fromRecs.length === 0 ? [...ALL_CHARACTERS] : [...fromRecs, 'rei'];
+  const set = new Set(base);
+  if (financeShow) set.add('minae');
+  else set.delete('minae');
+  return [...set];
 }
 
 // ── X（旧Twitter/SNS）用システムプロンプト ──────────────────────
@@ -265,7 +271,7 @@ function findDeptSectionEnd(note, fromIndex) {
     note.indexOf('\n### ', fromIndex),
     note.indexOf('\n## ',  fromIndex),
   ];
-  const emojiRe = /\n(?:😎|🤨|🙂|🧐|⚖️)/;
+  const emojiRe = /\n(?:😎|🤨|🙂|🧐|💴|⚖️)/;
   const rest = note.slice(fromIndex);
   const emojiMatch = emojiRe.exec(rest);
   if (emojiMatch) candidates.push(fromIndex + emojiMatch.index);
@@ -401,6 +407,94 @@ function injectRecommendationSummary(note, recs, decision, pf) {
   const insertAt = sectionIdx + sectionLen;
   console.log(`[injectRecommendationSummary] 挿入: sectionIdx=${sectionIdx} len=${sectionLen} block=${block.slice(0,20)}...`);
   return note.slice(0, insertAt) + '\n\n' + block + note.slice(insertAt + 1);
+}
+
+// ── 💴 財務戦略部（財前ミナ）セクションの機械ブロック ──────────
+// financeCtx: { show, tone, row } — publish() が financeStrategy.resolveArticleVisibility で算出。
+// 「状態：」「現金比率：」「提案：」「承認：」行はここで finance_proposals の値から確定挿入し、
+// LLM が書いた同種行は除去する（⚖️最終判断と同じ思想。数値の幻覚を封じる）。
+const FINANCE_HEADER_RE   = /#{0,3}[ \t]*💴[ \t]*財務戦略部(?:（財前ミナ）)?[^\n]*/;
+const FINANCE_NEXT_SEC_RE = /\n[ \t]*#{0,3}[ \t]*(?:🌍|🎯|🏢|⚖️|🔴|💰|👀|👑)/;
+const FINANCE_LABEL_LINE_RE = /^[ \t]*(?:状態|現金比率|提案|承認)[：:][^\n]*\n?/gm;
+
+function buildFinanceMachineLines(financeCtx, financeCfg) {
+  const fr    = financeCtx.row || {};
+  const tone  = financeCtx.tone || 'monitoring';
+  const state = String(fr.mode) === 'active' ? '発動中' : '監視中';
+  const crNum = parseFloat(fr.cash_ratio_before);
+  const cr    = Number.isFinite(crNum) ? String(Math.round(crNum * 10) / 10) : '—';
+  const lines = [
+    `状態：${state}`,
+    `現金比率：${cr}%（発動ライン${financeCfg.ACTIVATE_BELOW_PCT}%）`,
+  ];
+  if (tone === 'proposal') {
+    const amt  = fr.amount ? `¥${parseInt(fr.amount, 10).toLocaleString()}` : 'なし';
+    const gain = (fr.gain_pct !== '' && fr.gain_pct != null) ? `／含み益+${fr.gain_pct}%` : '';
+    lines.push(`提案：${fr.asset_name || 'なし'} を ${amt} 部分利確${gain}`);
+    const rv = fr.risk_review  || '未評価';
+    const av = fr.audit_review || '未評価';
+    const verdict = fr.status === 'approved' ? '承認' : fr.status === 'rejected' ? '却下' : (fr.status || '—');
+    lines.push(`承認：リスク管理部 ${rv} ／ 審査部 ${av} → ${verdict}`);
+  } else if (tone === 'active') {
+    lines.push('提案：なし（発動ラインは割ったが、利益確定の条件を満たす銘柄がなかった）');
+  }
+  return lines.join('\n');
+}
+
+function financeFallbackComment(tone) {
+  if (tone === 'proposal') {
+    return '長期投資を続けるための資金余力を回復する目的で、条件を満たした銘柄に限って限定的な部分利確を提案しました。承認結果に従い、次の下落局面に備えます。';
+  }
+  if (tone === 'active') {
+    return '発動ラインは割りましたが、利益確定に適した含み益・保有期間・目標超過の条件を満たす銘柄がなく、今回は動きません。長期方針を崩さないことを優先します。';
+  }
+  return '現金比率は発動ラインに接近しています。まとまった含み益が乗った銘柄が現れるまでは、無理に動かず現金余力の回復機会をうかがいます。';
+}
+
+function injectFinanceSection(note, financeCtx, financeCfg) {
+  const headerMatch = note.match(FINANCE_HEADER_RE);
+
+  // 非表示日: LLM が誤って生成していたら丸ごと除去
+  if (!financeCtx || !financeCtx.show || !financeCtx.row) {
+    if (headerMatch) {
+      const start   = note.indexOf(headerMatch[0]);
+      const after   = note.slice(start + headerMatch[0].length);
+      const nextIdx = after.search(FINANCE_NEXT_SEC_RE);
+      const end     = nextIdx >= 0 ? start + headerMatch[0].length + nextIdx : note.length;
+      note = (note.slice(0, start) + note.slice(end)).replace(/\n{3,}/g, '\n\n');
+      console.log('[publisher] 💴財務戦略部: 非表示日にLLMが生成 → 除去');
+    }
+    return note;
+  }
+
+  const HEADER   = '## 💴 財務戦略部（財前ミナ）';
+  const machine  = buildFinanceMachineLines(financeCtx, financeCfg);
+
+  if (headerMatch) {
+    const start   = note.indexOf(headerMatch[0]);
+    const headEnd = start + headerMatch[0].length;
+    const after   = note.slice(headEnd);
+    const nextIdx = after.search(FINANCE_NEXT_SEC_RE);
+    const bodyRaw = nextIdx >= 0 ? after.slice(0, nextIdx) : after;
+    const tail    = nextIdx >= 0 ? after.slice(nextIdx) : '\n';
+    let comment = bodyRaw.replace(FINANCE_LABEL_LINE_RE, '').replace(/^[ \t]*[・\-*][ \t]*$/gm, '').trim();
+    if (comment.length < 10) comment = financeFallbackComment(financeCtx.tone);
+    note = note.slice(0, start) + HEADER + '\n' + machine + '\n\n' + comment + '\n' + tail.replace(/^\n+/, '\n');
+    console.log(`[publisher] 💴財務戦略部: 機械ブロック差し替え (tone=${financeCtx.tone})`);
+    return note;
+  }
+
+  // LLM が書かなかった → 🔴本日の論点 の直前に挿入（無ければ ⚖️最終判断 の前、それも無ければ末尾）
+  const section = `${HEADER}\n${machine}\n\n${financeFallbackComment(financeCtx.tone)}\n\n`;
+  let at = note.search(/\n[ \t]*#{0,3}[ \t]*🔴[^\n]*本日の論点/);
+  if (at < 0) at = note.search(/\n[ \t]*#{0,3}[ \t]*⚖️[^\n]*最終判断/);
+  if (at < 0) {
+    note = note.trimEnd() + '\n\n' + section;
+  } else {
+    note = note.slice(0, at + 1) + section + note.slice(at + 1);
+  }
+  console.log(`[publisher] 💴財務戦略部: セクションを新規挿入 (tone=${financeCtx.tone})`);
+  return note;
 }
 
 // ── Rule 33 修正用: 実データの橋渡しヒント（2026-08-14追加） ──────────────
@@ -615,7 +709,7 @@ function sanitizeVoteCommentForArticle(comment) {
   return comment;
 }
 
-async function buildContext(date, decisions, votes, recs) {
+async function buildContext(date, decisions, votes, recs, financeCtx = null) {
   // positions/pending は portfolio_status.{positions,pending}_json から取得（Single Source of Truth）
   const [mkt, pf, candidates] = await Promise.all([
     sheets.getLatestRowAsOf('market_data', date).catch(() => null),
@@ -848,6 +942,43 @@ async function buildContext(date, decisions, votes, recs) {
     );
   }
 
+  // ── 財務戦略部（財前ミナ）の状態 ─────────────────────────────
+  // financeCtx.show=true のときだけ 💴財務戦略部セクション用のブロックを渡す。
+  // 「状態：」「現金比率：」「提案：」「承認：」の各行は Phase C でシステムが機械挿入するため、
+  // ここでは財前ミナがコメントを書くための素材として数値を渡す（LLM は数値を創作しないこと）。
+  if (financeCtx && financeCtx.show && financeCtx.row) {
+    const fr    = financeCtx.row;
+    const tone  = financeCtx.tone || 'monitoring';
+    const cr    = fr.cash_ratio_before || (pf ? pf.cash_ratio : '') || '';
+    const state = String(fr.mode) === 'active' ? '発動中' : '監視中';
+    const fLines = [
+      `【財務戦略部（財前ミナ）の状態（💴財務戦略部セクションの機械ブロックはシステムが挿入する・変更禁止）】`,
+      `トーン: ${tone}`,
+      `状態: ${state}`,
+      `現金比率: ${cr}%（発動ライン ${financeStrategy.ACTIVATE_BELOW_PCT}% / 監視解除 ${financeStrategy.DEACTIVATE_AT_PCT}%）`,
+    ];
+    if (tone === 'proposal') {
+      const amt  = fr.amount ? `¥${parseInt(fr.amount, 10).toLocaleString()}` : '（金額未確定）';
+      const gain = fr.gain_pct !== '' && fr.gain_pct != null ? `含み益+${fr.gain_pct}%` : '';
+      fLines.push(`提案: ${fr.asset_name || '（銘柄未確定）'} を ${amt} 部分利確（${gain}／取得原価の${Math.round(financeStrategy.MAX_REDUCE_RATIO * 100)}%以内）`);
+      const rv = fr.risk_review || '未評価';
+      const av = fr.audit_review || '未評価';
+      const verdict = fr.status === 'approved' ? '承認' : fr.status === 'rejected' ? '却下' : fr.status;
+      fLines.push(`承認: リスク管理部=${rv} / 審査部=${av} → ${verdict}`);
+    } else if (tone === 'active') {
+      fLines.push(`提案: なし（発動ラインは割ったが、利益確定に適した含み益・保有期間・目標超過の条件を満たす銘柄がなかった）`);
+    }
+    if (fr.reason) fLines.push(`財務戦略部メモ: ${fr.reason}`);
+    fLines.push(
+      tone === 'monitoring'
+        ? `→ 財前ミナは「監視中」の立場で、発動ラインへの距離と、どの水準で部分利確の検討を始めるかを2〜3文で述べる。断定的な売却予告はしない。`
+        : tone === 'proposal'
+          ? `→ 財前ミナは提案と承認結果を受けて、この限定的な部分利確がなぜ長期方針の維持に必要かを2〜3文で述べる。`
+          : `→ 財前ミナは「発動したが動かない」判断の理由を2〜3文で述べる。`,
+    );
+    lines.push(fLines.join('\n'));
+  }
+
   return lines.join('\n\n');
 }
 
@@ -864,7 +995,7 @@ async function getArticleNumber(date) {
 // 再生成ループから複数回呼ばれるため、date確定値の再取得は行わずctxの値を使い回す。
 // ctx: { date, articleNum, recs, decisions, pf, mkt }
 function applyPostProcessing(rawNote, ctx) {
-  const { date, articleNum, recs, decisions, pf, mkt } = ctx;
+  const { date, articleNum, recs, decisions, pf, mkt, financeCtx } = ctx;
   let note = rawNote;
 
   // 後処理①: 誤字修正
@@ -886,7 +1017,7 @@ function applyPostProcessing(rawNote, ctx) {
     return m ? fromIndex + m.index : -1;
   };
   // 「次の主要セクション見出し」の判定も同様に絵文字のみで行う（行頭想定）。
-  const MAJOR_SECTION_RE = /(?:^|\n)\s*#{0,2}\s*(?:📌|🌍|🎯|🏢|⚖️|🔴|💰|👀|👑)/;
+  const MAJOR_SECTION_RE = /(?:^|\n)\s*#{0,2}\s*(?:📌|🌍|🎯|🏢|💴|⚖️|🔴|💰|👀|👑)/;
 
   // 後処理④: ▼HISTORY▼ 機械注入（AI Capital模擬ファンドセクション末尾に配置）
   note = note.replace(/▼HISTORY▼/g, '');
@@ -980,7 +1111,7 @@ function applyPostProcessing(rawNote, ctx) {
   // 指示するため、LLMがこのブロックをそのまま複製することがあり、除去せず挿入すると
   // 「📊 AI Capital Market Check」が2回出現するRule28違反になっていた（2026-08-14判明・修正）。
   {
-    const marketCheckRe = /#{0,2}\s*📊\s*AI Capital Market Check[\s\S]*?(?=\n#{0,2}\s*(?:📌|🌍|🎯|🏢|⚖️|🔴|💰|👀|👑)|$)/g;
+    const marketCheckRe = /#{0,2}\s*📊\s*AI Capital Market Check[\s\S]*?(?=\n#{0,2}\s*(?:📌|🌍|🎯|🏢|💴|⚖️|🔴|💰|👀|👑)|$)/g;
     note = note.replace(marketCheckRe, '').replace(/\n{3,}/g, '\n\n');
   }
   if (mkt && note.includes('📋')) {
@@ -1059,6 +1190,9 @@ function applyPostProcessing(rawNote, ctx) {
     ];
   }
   note = injectRecommendationSummary(note, recsForSum, decision, pf);
+
+  // 後処理⑭b: 💴 財務戦略部（財前ミナ）セクションの機械ブロック挿入／非表示日の除去
+  note = injectFinanceSection(note, financeCtx, financeStrategy);
 
   // 後処理⑯: 空行正規化（━━━ は削除済みのため圧縮不要）
   note = note.replace(/\n{3,}/g, '\n\n');
@@ -1211,7 +1345,7 @@ async function publish(date) {
   const articleNum = await getArticleNumber(date);
   console.log(`[publisher] 記事番号: ${articleNum}`);
 
-  const [decisions, votes, recs, candidates] = await Promise.all([
+  const [decisions, votes, recs, candidates, financeRows] = await Promise.all([
     sheets.getRowsByDate('final_decisions', date),
     sheets.getRowsByDate('agent_votes', date),
     // agent_recommendations を優先、なければ department_recommendations にフォールバック
@@ -1219,7 +1353,20 @@ async function publish(date) {
       .then(r => r.length > 0 ? r : sheets.getRowsByDate('department_recommendations', date))
       .catch(() => []),
     sheets.getRowsByDate('candidate_assets', date).catch(() => []),
+    sheets.getRowsByDate('finance_proposals', date).catch(() => []),
   ]);
+
+  // ── 財務戦略部（財前ミナ）の記事登場判定（Phase A: ログのみ・出力は変えない）──
+  const financeRow = (financeRows || [])[0] || null;
+  const financeVisibility = financeStrategy.resolveArticleVisibility({
+    date,
+    financeRow,
+    cashRatioPct: pf ? pf.cash_ratio : null,
+  });
+  console.log(
+    `[publisher] 財務戦略部セクション: show=${financeVisibility.show}` +
+    `${financeVisibility.tone ? ` tone=${financeVisibility.tone}` : ''} (${financeVisibility.reason})`,
+  );
 
   // ── データ整合性チェック ─────────────────────────────────────
   const integrityWarnings = [];
@@ -1267,7 +1414,11 @@ async function publish(date) {
     console.log('[publisher] データ整合性チェック: 問題なし');
   }
 
-  let context = await buildContext(date, decisions, votes, recs);
+  let context = await buildContext(date, decisions, votes, recs, {
+    show: financeVisibility.show,
+    tone: financeVisibility.tone,
+    row:  financeRow,
+  });
 
   // ── 前回、AI編集長が公開を見送った理由を今回のプロンプトへ反映（実装⑦・自己学習） ──
   // 前日分のdevelopment_logsにEDITOR_REJECTIONが記録されていれば、その理由を改善指示として
@@ -1288,12 +1439,16 @@ async function publish(date) {
   }
 
   // Phase3: 当日 agent_recommendations に登場した部署だけをプロンプトに含める（＋相沢レイは常時）
-  const activeCharacters = computeActiveCharacters(recs);
+  // 財前ミナ（minae）は財務戦略部セクション表示日のみ。
+  const activeCharacters = computeActiveCharacters(recs, financeVisibility.show);
   console.log(`[publisher] 稼働部署: ${activeCharacters.join(', ')}`);
   const noteSystem = buildNoteSystemPrompt({ activeCharacters });
 
   // ── ctx: 生成・後処理・再生成ループ全体で使い回すデータの束 ──────
-  const ctx = { date, articleNum, recs, decisions, pf, mkt };
+  const ctx = {
+    date, articleNum, recs, decisions, pf, mkt,
+    financeCtx: { show: financeVisibility.show, tone: financeVisibility.tone, row: financeRow },
+  };
 
   // note.com 記事生成（生成 + 決定論的後処理を1セットとして扱う）
   async function generateArticle(userPrompt) {
@@ -1310,7 +1465,7 @@ async function publish(date) {
   const MAX_QUALITY_ATTEMPTS = 5;
   let mechanicalFixCount = 0;
   let regenerationCount  = 0;
-  let validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
+  let validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date, financeCtx: ctx.financeCtx });
 
   for (let attempt = 1; attempt <= MAX_QUALITY_ATTEMPTS && !validation.ok; attempt++) {
     // ① 機械修正（LLM不要・正規表現のみ・即時）
@@ -1319,7 +1474,7 @@ async function publish(date) {
       note = fix.note;
       mechanicalFixCount++;
       console.log(`[publisher] 機械修正 ${mechanicalFixCount}回目: ${fix.fixesApplied.join(', ')}`);
-      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
+      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date, financeCtx: ctx.financeCtx });
       if (validation.ok) {
         console.log('[publisher] 機械修正のみで品質基準を満たしました（LLM再生成は不使用）');
         break;
@@ -1344,7 +1499,7 @@ async function publish(date) {
     try {
       note = await generateArticle(repairPrompt);
       regenerationCount++;
-      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
+      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date, financeCtx: ctx.financeCtx });
     } catch (err) {
       console.warn(`[publisher] LLM再生成 ${attempt}回目が失敗（${err.message}）→ 直前の記事版を保持してループを終了します`);
       break;
@@ -1379,7 +1534,7 @@ async function publish(date) {
         mechanicalFixCount++;
         console.log(`[publisher] 機械修正 ${mechanicalFixCount}回目（最終救済後）: ${rescueFix.fixesApplied.join(', ')}`);
       }
-      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date });
+      validation = validateArticle({ note, pf, candidates, decisions, recs, articleNum, date, financeCtx: ctx.financeCtx });
       console.log(`[publisher] AI編集長による最終修正完了: ${validation.ok ? 'PASS' : `NG（残り警告${validation.warnings.length}件）`}`);
     } catch (err) {
       console.warn(`[publisher] AI編集長による最終修正に失敗: ${err.message}`);
@@ -1685,6 +1840,6 @@ async function publish(date) {
 }
 
 module.exports = {
-  publish, buildContext, applyPostProcessing, injectRecommendations, injectRecommendationSummary,
-  buildRule33DataHint, buildRule34Hint, X_SYSTEM, toPublicNoteUrl,
+  publish, buildContext, computeActiveCharacters, applyPostProcessing, injectRecommendations, injectRecommendationSummary,
+  injectFinanceSection, buildFinanceMachineLines, buildRule33DataHint, buildRule34Hint, X_SYSTEM, toPublicNoteUrl,
 };

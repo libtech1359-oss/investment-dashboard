@@ -2,6 +2,9 @@
 
 const { getDisplayCandidates, namesMatch } = require('./candidateGroups');
 
+// 💴財務戦略部（財前ミナ）見出し検出（publisher.js の FINANCE_HEADER_RE と同義）。Rule 42 で使用。
+const FINANCE_HEADER_RE_V = /#{0,3}[ \t]*💴[ \t]*財務戦略部/;
+
 /**
  * articleValidator.js — 公開前記事整合性監査
  *
@@ -18,7 +21,7 @@ const { getDisplayCandidates, namesMatch } = require('./candidateGroups');
  * @param {string} articleData.date        - 記事日付 (YYYY-MM-DD)
  * @returns {{ ok: boolean, warnings: string[] }}
  */
-function validateArticle({ note, pf, candidates, decisions, recs, articleNum, date }) {
+function validateArticle({ note, pf, candidates, decisions, recs, articleNum, date, financeCtx = null }) {
   const warnings = [];
 
   const decision    = decisions?.[0] ?? null;
@@ -265,7 +268,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     // 部署サブ絵文字（😎🤨🙂🧐）は 🏢セクション内に含まれるため区切りとしない
     const sectionStart = note.indexOf(matchStr);
     const afterHeader  = note.slice(sectionStart + matchStr.length);
-    const nextIdx      = afterHeader.search(/\n(?:🌍|🎯|🏢|⚖️|👀|👑|💰|🎪)/);
+    const nextIdx      = afterHeader.search(/\n(?:🌍|🎯|🏢|💴|⚖️|👀|👑|💰|🎪)/);
     const body         = (nextIdx >= 0 ? afterHeader.slice(0, nextIdx) : afterHeader.slice(0, 300))
       .replace(/\s+/g, '')
       .trim();
@@ -469,7 +472,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     if (!m) return null;
     const start = note.indexOf(m[0]);
     const after = note.slice(start + m[0].length);
-    const nextIdx = after.search(/\n(?:🌍|🎯|🏢|⚖️|👀|👑|💰|🎪|😎|🤨|🙂|🧐)/);
+    const nextIdx = after.search(/\n(?:🌍|🎯|🏢|💴|⚖️|👀|👑|💰|🎪|😎|🤨|🙂|🧐)/);
     return (nextIdx >= 0 ? after.slice(0, nextIdx) : after.slice(0, 500)).trim();
   }
 
@@ -1064,6 +1067,45 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     }
   }
 
+  // ── Rule 42: 💴財務戦略部（財前ミナ）セクションの整合性 ───────────────────────────
+  // publisher.js の injectFinanceSection() が正しく走っていれば必ず一致するはずの安全網。
+  //   A) financeCtx.show と 記事内の💴セクション有無が一致するか
+  //   B) 機械挿入行（状態：/現金比率：）が入っているか
+  //   C) tone=proposal のとき、提案行の銘柄・金額が finance_proposals 行と一致するか
+  if (financeCtx) {
+    const hasSection = FINANCE_HEADER_RE_V.test(note);
+    if (financeCtx.show && !hasSection) {
+      warnings.push(warn(42, '財務戦略部セクションが表示対象日なのに記事内に見つかりません（機械挿入の失敗の可能性）',
+        ['tone', [String(financeCtx.tone || '')]],
+      ));
+    } else if (!financeCtx.show && hasSection) {
+      warnings.push(warn(42, '財務戦略部セクションが非表示日なのに記事内に残っています（除去の失敗の可能性）'));
+    } else if (financeCtx.show && hasSection) {
+      const body = extractSectionBody(note, [FINANCE_HEADER_RE_V, /💴[^\n]*財務戦略部/]);
+      if (!/状態[：:]/.test(body) || !/現金比率[：:]/.test(body)) {
+        warnings.push(warn(42, '財務戦略部セクションに機械挿入行（状態／現金比率）が見当たりません'));
+      }
+      const fr = financeCtx.row || {};
+      if (financeCtx.tone === 'proposal') {
+        const propMatch = body.match(/提案[：:]\s*([^\n]+)/);
+        const propLine  = propMatch ? propMatch[1] : '';
+        if (fr.asset_name && !propLine.includes(fr.asset_name)) {
+          warnings.push(warn(42, '財務戦略部の提案銘柄が finance_proposals と一致しません',
+            ['finance_proposals.asset_name', [String(fr.asset_name)]],
+            ['記事内の提案行',                [propLine || '（未検出）']],
+          ));
+        }
+        const amtNum = parseInt(fr.amount || 0, 10);
+        if (amtNum > 0 && !propLine.includes(`¥${amtNum.toLocaleString()}`)) {
+          warnings.push(warn(42, '財務戦略部の提案額が finance_proposals と一致しません',
+            ['finance_proposals.amount', [`¥${amtNum.toLocaleString()}`]],
+            ['記事内の提案行',            [propLine || '（未検出）']],
+          ));
+        }
+      }
+    }
+  }
+
   return { ok: warnings.length === 0, warnings };
 }
 
@@ -1079,7 +1121,7 @@ function extractSectionBody(note, headerPatterns) {
     if (!m) continue;
     const start = note.indexOf(m[0]);
     const after = note.slice(start + m[0].length);
-    const nextIdx = after.search(/\n(?:🌍|🎯|🏢|⚖️|👀|👑|💰|🎪)/);
+    const nextIdx = after.search(/\n(?:🌍|🎯|🏢|💴|⚖️|👀|👑|💰|🎪)/);
     return (nextIdx >= 0 ? after.slice(0, nextIdx) : after.slice(0, 500)).trim();
   }
   return '';

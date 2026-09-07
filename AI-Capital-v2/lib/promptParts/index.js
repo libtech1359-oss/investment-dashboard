@@ -20,12 +20,13 @@ const shin = require('./characters/shin');
 const misaki = require('./characters/misaki');
 const aoi = require('./characters/aoi');
 const gai = require('./characters/gai');
+const minae = require('./characters/minae');
 const rei = require('./characters/rei');
 const sectionTemplates = require('./templates/sectionTemplates');
 const outputTemplate = require('./templates/outputTemplate');
 const selfAuditChecklist = require('./templates/selfAuditChecklist');
 
-const MODULES = { articlePolicy, formatRules, consistencyRules, investmentPhilosophy, generationRules, team, shin, misaki, aoi, gai, rei, sectionTemplates, outputTemplate, selfAuditChecklist };
+const MODULES = { articlePolicy, formatRules, consistencyRules, investmentPhilosophy, generationRules, team, shin, misaki, aoi, gai, minae, rei, sectionTemplates, outputTemplate, selfAuditChecklist };
 
 // 元のテンプレート文言と完全一致する順序を維持したセグメント一覧（Phase1で検証済み）。
 // dimension: 'rule'（rules/*・constitution/* の各ブロック） / 'character'（characters/* のプロフィール＋対応する出力欄テンプレート）/
@@ -290,6 +291,12 @@ const SEGMENTS = [
     "filterKey": "gai"
   },
   {
+    "mod": "minae",
+    "key": "profile",
+    "dimension": "character",
+    "filterKey": "minae"
+  },
+  {
     "mod": "rei",
     "key": "profile",
     "dimension": "character",
@@ -366,6 +373,12 @@ const SEGMENTS = [
     "key": "gaiOutput",
     "dimension": "character",
     "filterKey": "gai"
+  },
+  {
+    "mod": "sectionTemplates",
+    "key": "minaeOutput",
+    "dimension": "character",
+    "filterKey": "minae"
   },
   {
     "mod": "outputTemplate",
