@@ -77,6 +77,7 @@ const TARGET_ALLOCATION   = require('../config/targetAllocation');
 const CB                  = require('../config/categoryBonus');
 const CP                  = require('../config/candidatePenalty');
 const LONG_TERM_PRIORITY  = require('../config/longTermPriority');
+const cashFloor           = require('../config/cashFloor');
 
 const SIGNAL_WEIGHT = {
   BUY: 2.0, ACCUMULATE: 1.0, WAIT: 0.0, DEFEND: -1.0, SELL: -2.0,
@@ -627,6 +628,39 @@ async function run(date) {
           if (pf) {
             amount = String(Math.round(cash * 0.03 / 1000) * 1000);
             console.log(`[signalAggregator] 金額: cash×3% ¥${parseInt(amount).toLocaleString()} (部署推薦なし)`);
+          }
+        }
+
+        // ── 現金フロア（買い側ブレーキ。売りは発生させない）─────────────
+        // 現金比率が下限圏（config/cashFloor.js）に入ると買付額を線形逓減し、
+        // 下限以下では買付ゼロ → WAIT へ落とす。暴落シグナル時のみ下限を一段下げる。
+        // observation（現金比率70%ゲート）はこの帯に来ないため対象外。
+        if (amount && pf && !observation) {
+          const crash = cashFloor.isCrashSignal({
+            fearGreed:       mkt ? mkt.fear_greed : undefined,
+            nasdaqChangePct: mkt ? mkt.nasdaq100  : undefined,
+          });
+          const budget = cashFloor.resolveBuyBudget({
+            cashRatioPct: pf.cash_ratio,
+            cashJpy:      pf.cash,
+            baseAmount:   parseInt(amount, 10),
+            crashSignal:  crash,
+          });
+          if (budget.amount !== parseInt(amount, 10)) {
+            console.log(
+              `[signalAggregator] 現金フロア: ¥${parseInt(amount).toLocaleString()} → ¥${budget.amount.toLocaleString()} ` +
+              `(現金比率${pf.cash_ratio}% factor=${budget.factor.toFixed(2)}${crash ? ' 暴落例外ON' : ''})`,
+            );
+            if (budget.amount === 0) {
+              final_signal      = 'WAIT';
+              target_asset      = '';
+              amount            = '';
+              assetReason       = budget.note;
+              waitReasonOverride = budget.note;
+            } else {
+              amount      = String(budget.amount);
+              assetReason = `${assetReason} ${budget.note}`.trim();
+            }
           }
         }
 
