@@ -141,3 +141,76 @@ test('C2.7 proposal・提案額が不一致 → Rule 42 警告', () => {
   const { warnings } = validateArticle({ ...BASE, note, financeCtx: fc });
   assert.ok(warnings.some(w => /提案額が finance_proposals と一致しません/.test(w)));
 });
+
+// ── C3: 2026-09-08 本番FAIL の回帰（💴未登録→autofix剥がし→重複・現金比率不一致）──
+const autoFix = require('../lib/articleAutoFix');
+
+test('C3.1 💴 が両方の ALLOWED_HEADING_EMOJI に登録されている（autofix が見出しから剥がさない）', () => {
+  const src = require('fs').readFileSync(require('path').resolve(__dirname, '../lib/articleAutoFix.js'), 'utf8');
+  assert.match(src, /ALLOWED_HEADING_EMOJI[\s\S]{0,200}💴/);
+  const vsrc = require('fs').readFileSync(require('path').resolve(__dirname, '../lib/articleValidator.js'), 'utf8');
+  assert.match(vsrc, /ALLOWED_HEADING_EMOJI[\s\S]{0,200}💴/);
+});
+
+test('C3.2 autoFixLayout は 💴 財務戦略部 見出しを剥がさない', () => {
+  const note = '## 🏢 各部署の判断\n### 審査部（鬼塚ガイ）\n要約：x\n\n## 💴 財務戦略部（財前ミナ）\n状態：発動中\n現金比率：14.4%（発動ライン20%）\n提案：なし\n所感を述べます。\n\n## 🔴 本日の論点\n・x\n';
+  const { note: fixed } = autoFix.autoFixLayout(note);
+  assert.match(fixed, /💴[ \t]*財務戦略部（財前ミナ）/, '💴 が剥がされてはいけない');
+});
+
+test('C3.3 現金比率は portfolio_status を優先（finance_proposals.cash_ratio_before は使わない）', () => {
+  // 本番: pf.cash_ratio=14.4（pending反映後）/ row.cash_ratio_before=16.7（発動判定時） → 記事は 14.4
+  const lines = buildFinanceMachineLines(
+    { tone: 'active', row: { mode: 'active', status: 'no_action', cash_ratio_before: '16.7' } },
+    financeStrategy,
+    { cash_ratio: '14.4' },
+  );
+  assert.match(lines, /現金比率：14\.4%（発動ライン20%）/);
+  assert.doesNotMatch(lines, /16\.7/);
+});
+
+test('C3.4 pf 未指定なら cash_ratio_before にフォールバック', () => {
+  const lines = buildFinanceMachineLines(
+    { tone: 'active', row: { mode: 'active', status: 'no_action', cash_ratio_before: '16.7' } },
+    financeStrategy,
+  );
+  assert.match(lines, /現金比率：16\.7%/);
+});
+
+test('C3.5 LLM が 💴 を落とした見出し → 💴付きに正規化・重複なし・LLMコメント保持', () => {
+  const llm = ARTICLE_SKELETON.replace(
+    '## 🔴 本日の論点',
+    '財務戦略部（財前ミナ）\n状態：発動中\n現金比率：16.7%（発動ライン 20% / 監視解除 25%）\n提案：なし（発動ラインは割ったが、利益確定の条件を満たす銘柄がなかった）\n利益確定に適した銘柄がなく今回は動きません。\n\n## 🔴 本日の論点',
+  );
+  const fc = { show: true, tone: 'active', row: { mode: 'active', status: 'no_action', cash_ratio_before: '16.7' } };
+  const out = injectFinanceSection(llm, fc, financeStrategy, { cash_ratio: '14.4' });
+  assert.equal((out.match(/財務戦略部（財前ミナ）/g) || []).length, 1, '1セクションに正規化');
+  assert.match(out, /## 💴 財務戦略部（財前ミナ）/, '💴付き見出しになる');
+  assert.equal((out.match(/提案：なし（発動ライン/g) || []).length, 1, '機械行の重複なし');
+  assert.match(out, /現金比率：14\.4%（発動ライン20%）/);
+  assert.match(out, /今回は動きません/, 'LLMコメント保持');
+});
+
+test('C3.6 injectFinanceSection は冪等（2回通しても1セクション）', () => {
+  const fc = { show: true, tone: 'active', row: { mode: 'active', status: 'no_action', cash_ratio_before: '16.7' } };
+  const once  = injectFinanceSection(ARTICLE_SKELETON, fc, financeStrategy, { cash_ratio: '14.4' });
+  const twice = injectFinanceSection(once, fc, financeStrategy, { cash_ratio: '14.4' });
+  assert.equal((twice.match(/財務戦略部（財前ミナ）/g) || []).length, 1);
+  assert.equal((twice.match(/提案：なし（発動ライン/g) || []).length, 1);
+});
+
+test('C3.7 既存💴セクション＋LLMが2個目を追記 → 1つに収束・幻覚値除去', () => {
+  const fc = { show: true, tone: 'active', row: { mode: 'active', status: 'no_action', cash_ratio_before: '16.7' } };
+  const one = injectFinanceSection(ARTICLE_SKELETON, fc, financeStrategy, { cash_ratio: '14.4' });
+  const dup = one.replace('## 🔴 本日の論点', '財務戦略部（財前ミナ）\n状態：発動中\n現金比率：99%\n提案：なし（発動ラインは割ったが、利益確定の条件を満たす銘柄がなかった）\n重複本文。\n\n## 🔴 本日の論点');
+  const out = injectFinanceSection(dup, fc, financeStrategy, { cash_ratio: '14.4' });
+  assert.equal((out.match(/財務戦略部（財前ミナ）/g) || []).length, 1);
+  assert.doesNotMatch(out, /99%/);
+});
+
+test('C3.8 Rule 42 は 💴 を落とした見出しでもセクションを検出できる', () => {
+  const note = ARTICLE_SKELETON.replace('## 🔴 本日の論点',
+    '財務戦略部（財前ミナ）\n状態：発動中\n現金比率：14.4%（発動ライン20%）\n提案：なし\n所感。\n\n## 🔴 本日の論点');
+  const { warnings } = validateArticle({ ...BASE, note, financeCtx: { show: true, tone: 'active', row: {} } });
+  assert.equal(warnings.filter(w => /Rule 42/.test(w)).length, 0, warnings.filter(w => /Rule 42/.test(w)).join(' / '));
+});

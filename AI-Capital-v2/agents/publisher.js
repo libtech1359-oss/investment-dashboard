@@ -413,15 +413,20 @@ function injectRecommendationSummary(note, recs, decision, pf) {
 // financeCtx: { show, tone, row } — publish() が financeStrategy.resolveArticleVisibility で算出。
 // 「状態：」「現金比率：」「提案：」「承認：」行はここで finance_proposals の値から確定挿入し、
 // LLM が書いた同種行は除去する（⚖️最終判断と同じ思想。数値の幻覚を封じる）。
-const FINANCE_HEADER_RE   = /#{0,3}[ \t]*💴[ \t]*財務戦略部(?:（財前ミナ）)?[^\n]*/;
-const FINANCE_NEXT_SEC_RE = /\n[ \t]*#{0,3}[ \t]*(?:🌍|🎯|🏢|⚖️|🔴|💰|👀|👑)/;
-const FINANCE_LABEL_LINE_RE = /^[ \t]*(?:状態|現金比率|提案|承認)[：:][^\n]*\n?/gm;
+// 財務戦略部の見出し（💴 は LLM=小型モデルが落とすことがあるため任意扱い。「（財前ミナ）」で誤検出を防ぐ）
+const FINANCE_HEADING_RE     = /^[ \t]*#{0,3}[ \t]*(?:💴[ \t]*)?財務戦略部（財前ミナ）[^\n]*$/m;
+// 財務戦略部セクションの終端＝次のメジャー見出し または 次の財務戦略部見出し（重複時の分離用）
+const FINANCE_SECTION_END_RE = /\n[ \t]*#{0,3}[ \t]*(?:(?:💴[ \t]*)?財務戦略部（財前ミナ）|🌍|🎯|🏢|⚖️|🔴|💰|👀|👑)/;
+const FINANCE_LABEL_LINE_RE  = /^[ \t]*(?:状態|現金比率|提案|承認)[：:][^\n]*\n?/gm;
 
-function buildFinanceMachineLines(financeCtx, financeCfg) {
+function buildFinanceMachineLines(financeCtx, financeCfg, pf) {
   const fr    = financeCtx.row || {};
   const tone  = financeCtx.tone || 'monitoring';
   const state = String(fr.mode) === 'active' ? '発動中' : '監視中';
-  const crNum = parseFloat(fr.cash_ratio_before);
+  // 現金比率は記事全体（💰模擬ファンド欄・Rule 05）と一致させるため portfolio_status を最優先。
+  // 財務戦略部の cash_ratio_before は発動判定時点の内部スナップショットで、発注pending反映前のため使わない。
+  const rawCr = (pf && pf.cash_ratio != null && String(pf.cash_ratio) !== '') ? pf.cash_ratio : fr.cash_ratio_before;
+  const crNum = parseFloat(rawCr);
   const cr    = Number.isFinite(crNum) ? String(Math.round(crNum * 10) / 10) : '—';
   const lines = [
     `状態：${state}`,
@@ -451,41 +456,44 @@ function financeFallbackComment(tone) {
   return '現金比率は発動ラインに接近しています。まとまった含み益が乗った銘柄が現れるまでは、無理に動かず現金余力の回復機会をうかがいます。';
 }
 
-function injectFinanceSection(note, financeCtx, financeCfg) {
-  const headerMatch = note.match(FINANCE_HEADER_RE);
+// 記事から財務戦略部セクションを全て取り除く。LLM が書いたコメント本文（機械ラベル行を除いた分）を回収して返す。
+// 💴 が落ちて重複した場合や、再生成ループで前回の機械ブロックが混入した場合でも確実に1つに正規化するための土台。
+function stripFinanceSections(note) {
+  const comments = [];
+  for (let guard = 0; guard < 6; guard++) {
+    const m = note.match(FINANCE_HEADING_RE);
+    if (!m) break;
+    const start     = note.indexOf(m[0]);
+    const afterHead = start + m[0].length;
+    const rest      = note.slice(afterHead);
+    const endRel    = rest.search(FINANCE_SECTION_END_RE);
+    const end       = endRel >= 0 ? afterHead + endRel : note.length;
+    const body      = note.slice(afterHead, end)
+      .replace(FINANCE_LABEL_LINE_RE, '')
+      .replace(/^[ \t]*[・\-*][ \t]*$/gm, '')
+      .trim();
+    if (body) comments.push(body);
+    note = (note.slice(0, start) + note.slice(end)).replace(/\n{3,}/g, '\n\n');
+  }
+  return { note, comment: comments.find(c => c.length >= 10) || '' };
+}
 
-  // 非表示日: LLM が誤って生成していたら丸ごと除去
+function injectFinanceSection(note, financeCtx, financeCfg, pf) {
+  // まず既存の財務戦略部セクションを全撤去（重複・💴欠落・前回機械ブロック混入をここで吸収）
+  const { note: stripped, comment } = stripFinanceSections(note);
+  note = stripped;
+
+  // 非表示日: 撤去だけして終わり
   if (!financeCtx || !financeCtx.show || !financeCtx.row) {
-    if (headerMatch) {
-      const start   = note.indexOf(headerMatch[0]);
-      const after   = note.slice(start + headerMatch[0].length);
-      const nextIdx = after.search(FINANCE_NEXT_SEC_RE);
-      const end     = nextIdx >= 0 ? start + headerMatch[0].length + nextIdx : note.length;
-      note = (note.slice(0, start) + note.slice(end)).replace(/\n{3,}/g, '\n\n');
-      console.log('[publisher] 💴財務戦略部: 非表示日にLLMが生成 → 除去');
-    }
     return note;
   }
 
-  const HEADER   = '## 💴 財務戦略部（財前ミナ）';
-  const machine  = buildFinanceMachineLines(financeCtx, financeCfg);
+  const HEADER  = '## 💴 財務戦略部（財前ミナ）';
+  const machine = buildFinanceMachineLines(financeCtx, financeCfg, pf);
+  const body    = comment.length >= 10 ? comment : financeFallbackComment(financeCtx.tone);
+  const section = `${HEADER}\n${machine}\n\n${body}\n\n`;
 
-  if (headerMatch) {
-    const start   = note.indexOf(headerMatch[0]);
-    const headEnd = start + headerMatch[0].length;
-    const after   = note.slice(headEnd);
-    const nextIdx = after.search(FINANCE_NEXT_SEC_RE);
-    const bodyRaw = nextIdx >= 0 ? after.slice(0, nextIdx) : after;
-    const tail    = nextIdx >= 0 ? after.slice(nextIdx) : '\n';
-    let comment = bodyRaw.replace(FINANCE_LABEL_LINE_RE, '').replace(/^[ \t]*[・\-*][ \t]*$/gm, '').trim();
-    if (comment.length < 10) comment = financeFallbackComment(financeCtx.tone);
-    note = note.slice(0, start) + HEADER + '\n' + machine + '\n\n' + comment + '\n' + tail.replace(/^\n+/, '\n');
-    console.log(`[publisher] 💴財務戦略部: 機械ブロック差し替え (tone=${financeCtx.tone})`);
-    return note;
-  }
-
-  // LLM が書かなかった → 🔴本日の論点 の直前に挿入（無ければ ⚖️最終判断 の前、それも無ければ末尾）
-  const section = `${HEADER}\n${machine}\n\n${financeFallbackComment(financeCtx.tone)}\n\n`;
+  // 🔴本日の論点 の直前に挿入（無ければ ⚖️最終判断 の前、それも無ければ末尾）
   let at = note.search(/\n[ \t]*#{0,3}[ \t]*🔴[^\n]*本日の論点/);
   if (at < 0) at = note.search(/\n[ \t]*#{0,3}[ \t]*⚖️[^\n]*最終判断/);
   if (at < 0) {
@@ -493,8 +501,8 @@ function injectFinanceSection(note, financeCtx, financeCfg) {
   } else {
     note = note.slice(0, at + 1) + section + note.slice(at + 1);
   }
-  console.log(`[publisher] 💴財務戦略部: セクションを新規挿入 (tone=${financeCtx.tone})`);
-  return note;
+  console.log(`[publisher] 💴財務戦略部: セクション挿入 (tone=${financeCtx.tone}, LLMコメント${comment.length >= 10 ? '有' : '無→フォールバック'})`);
+  return note.replace(/\n{3,}/g, '\n\n');
 }
 
 // ── Rule 33 修正用: 実データの橋渡しヒント（2026-08-14追加） ──────────────
@@ -1192,7 +1200,7 @@ function applyPostProcessing(rawNote, ctx) {
   note = injectRecommendationSummary(note, recsForSum, decision, pf);
 
   // 後処理⑭b: 💴 財務戦略部（財前ミナ）セクションの機械ブロック挿入／非表示日の除去
-  note = injectFinanceSection(note, financeCtx, financeStrategy);
+  note = injectFinanceSection(note, financeCtx, financeStrategy, pf);
 
   // 後処理⑯: 空行正規化（━━━ は削除済みのため圧縮不要）
   note = note.replace(/\n{3,}/g, '\n\n');

@@ -2,8 +2,9 @@
 
 const { getDisplayCandidates, namesMatch } = require('./candidateGroups');
 
-// 💴財務戦略部（財前ミナ）見出し検出（publisher.js の FINANCE_HEADER_RE と同義）。Rule 42 で使用。
-const FINANCE_HEADER_RE_V = /#{0,3}[ \t]*💴[ \t]*財務戦略部/;
+// 💴財務戦略部（財前ミナ）見出し検出（publisher.js の FINANCE_HEADING_RE と同義）。Rule 42 で使用。
+// 💴 は小型LLMが落とすことがあるため任意扱い。誤検出防止に「（財前ミナ）」まで要求する。
+const FINANCE_HEADER_RE_V = /^[ \t]*#{0,3}[ \t]*(?:💴[ \t]*)?財務戦略部（財前ミナ）/m;
 
 /**
  * articleValidator.js — 公開前記事整合性監査
@@ -768,7 +769,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   // 単独行で「絵文字＋短い見出し語」の形をしている行のみを対象とする（本文中の絵文字は対象外）。
   {
     const ALLOWED_HEADING_EMOJI = new Set([
-      '📊', '📋', '📌', '🌍', '🎯', '🏢', '⚖️', '🔴', '💰', '👀', '👑',
+      '📊', '📋', '📌', '🌍', '🎯', '🏢', '💴', '⚖️', '🔴', '💰', '👀', '👑',
       '😎', '🤨', '🙂', '🧐', '😨', '📉', '⚠️', '💵',
     ]);
     const headingLike = noteLines
@@ -1081,7 +1082,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     } else if (!financeCtx.show && hasSection) {
       warnings.push(warn(42, '財務戦略部セクションが非表示日なのに記事内に残っています（除去の失敗の可能性）'));
     } else if (financeCtx.show && hasSection) {
-      const body = extractSectionBody(note, [FINANCE_HEADER_RE_V, /💴[^\n]*財務戦略部/]);
+      const body = extractSectionBody(note, [FINANCE_HEADER_RE_V, /財務戦略部（財前ミナ）/]);
       if (!/状態[：:]/.test(body) || !/現金比率[：:]/.test(body)) {
         warnings.push(warn(42, '財務戦略部セクションに機械挿入行（状態／現金比率）が見当たりません'));
       }
