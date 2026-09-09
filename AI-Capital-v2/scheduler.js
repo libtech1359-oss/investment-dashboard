@@ -51,15 +51,28 @@ async function notify(msg) {
   if (reportChannel) await reportChannel.send(msg).catch(() => {});
 }
 
-// X投稿候補をWeb Intentリンク付きで通知する。
-// X APIの自動投稿は2026-08-26以降402で使えなくなったため（[[lib/xIntent.js]]参照）、
-// 「予告編テキスト入りでXの投稿画面が開くリンク」を1タップ踏む運用に統一した。
-async function notifyXCandidate(text) {
-  writeLog('scheduler', `X投稿候補\n${text}`);
+// 記事公開後の X 通知。
+// 1) publisher が data/x_session.json で「ポスト」まで自動実行できていれば その旨だけ通知。
+// 2) 自動ポスト未実行/失敗時は note と同等の投稿文(タイトル+URL)のワンタップリンクを出す。
+// 3) それも無ければ 従来の予告編テキスト（article.x）のワンタップリンクにフォールバック。
+async function notifyXCandidate(article) {
   if (!reportChannel) return;
-  await reportChannel.send({
-    content: xIntent.buildCandidateMessage(text),
-  }).catch(() => {});
+  if (article && article.xPosted) {
+    writeLog('scheduler', `X自動ポスト成功: ${article.noteUrl}`);
+    await reportChannel.send({ content: `✅ **Xへ自動ポスト済み**\n${article.noteUrl}` }).catch(() => {});
+    return;
+  }
+  if (article && article.xIntentUrl) {
+    writeLog('scheduler', `X投稿候補(note式)\n${article.xText || ''}`);
+    const why = article.xPostReason ? `（自動ポスト未実行: ${article.xPostReason}）` : '';
+    await reportChannel.send({
+      content: `▶ **Xワンタップ投稿**${why}\n${article.xIntentUrl}`,
+    }).catch(() => {});
+    return;
+  }
+  const text = article && article.x ? article.x : '';
+  writeLog('scheduler', `X投稿候補(予告編)\n${text}`);
+  await reportChannel.send({ content: xIntent.buildCandidateMessage(text) }).catch(() => {});
 }
 
 async function executeNav(schedule) {
@@ -206,13 +219,13 @@ async function execute(schedule) {
     }
 
     if (result.article?.published) {
-      await notifyXCandidate(result.article.x);
+      await notifyXCandidate(result.article);
       const noteLines = result.article.note.split('\n');
       const preview   = noteLines.slice(0, 10).join('\n');
       await notify(`📄 **note記事（公開済み）**\n${preview.slice(0, 800)}\n${result.article.noteUrl}`);
     } else if (result.article && !result.article.validationFailed) {
       // 内容は問題なかったが自動公開自体が失敗（note.com側UI変更・reCAPTCHA等）→ 下書きのまま人の確認を促す
-      await notifyXCandidate(result.article.x);
+      await notifyXCandidate(result.article);
       const noteLines = result.article.note.split('\n');
       const preview   = noteLines.slice(0, 10).join('\n');
       await notify(`⚠️ **自動公開に失敗したため下書きのみ保存されています。note.comで手動公開してください**\n${result.article.noteUrl}\n\n📄 記事冒頭\n${preview.slice(0, 800)}`);

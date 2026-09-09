@@ -127,12 +127,19 @@ function splitMessage(text, maxLen = 1900) {
   return chunks;
 }
 
-// X投稿候補を返す。X APIの自動投稿は2026-08-26以降402で使えなくなったため
-// （[[lib/xIntent.js]]参照）、「リンクを1タップ → Xの投稿画面が本文プリセット済みで
-// 開く」運用に統一した。
-//   block: 予告編テキストのコードブロック（他の情報と同じメッセージに畳んでOK）
-//   intentLine: ワンタップ投稿リンクの行（長すぎる場合 null）。別メッセージで送る。
+// X投稿の返信を組み立てる。
+//   1) publisher が data/x_session.json で「ポスト」まで自動実行済みなら その旨だけ。
+//   2) 自動ポスト未実行/失敗なら note と同等の投稿文(タイトル+URL)のワンタップリンク。
+//   3) それも無ければ 従来の予告編テキスト（article.x）のワンタップリンク。
+//   block: メッセージ本文に畳める文字列 / intentLine: 別メッセージで送るリンク行（無ければ null）
 function buildXPostReply(article) {
+  if (article?.xPosted) {
+    return { block: '✅ **Xへ自動ポスト済み**', intentLine: null };
+  }
+  if (article?.xIntentUrl) {
+    const why = article.xPostReason ? `（自動ポスト未実行: ${article.xPostReason}）` : '';
+    return { block: '', intentLine: `▶ **Xワンタップ投稿**${why}: ${article.xIntentUrl}` };
+  }
   if (!article?.x) return { block: '', intentLine: null };
   return {
     block:      xIntent.buildTextBlock(article.x),

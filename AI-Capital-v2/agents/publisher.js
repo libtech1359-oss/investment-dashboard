@@ -10,7 +10,8 @@ const fs            = require('fs');
 const path          = require('path');
 const { ask }       = require('../lib/ollama');
 const sheets        = require('../lib/sheets');
-const { saveDraft } = require('../lib/noteDraft');
+const { saveDraft, extractTitle } = require('../lib/noteDraft');
+const xAutoPost     = require('../lib/xAutoPost');
 const { generatePortfolioChart, generateFundHistoryChart } = require('../lib/chartGenerator');
 const thumbGen      = require('../lib/thumbnailGenerator');
 const { fgLabel, fgDisplay }     = require('../lib/marketUtils');
@@ -1838,12 +1839,31 @@ async function publish(date) {
   // グラフ埋め込みが2/2に満たない場合は、Validator FAIL等の他の失敗経路と同じ重みで
   // 「公開停止・要確認」として扱う（chartsIncompleteだけでは警告表示に留まっていたため
   // 2026-08-14に明示化。noteUrl自体は人間が手動で直すためのリンクとして返す）。
+  // ── 公開後: note と同等の投稿文（記事タイトル＋公開URL）で X へ自動ポスト ──
+  // X API 不使用。data/x_session.json（node lib/xLogin.js）があればヘッドレスで「ポスト」まで実行。
+  // 無い／失敗時は xIntentUrl を返し、scheduler がワンタップリンクへフォールバックする。
+  // publish 本体を絶対に壊さないよう try/catch で完全に隔離。
+  let xPosted = false, xIntentUrl = null, xPostReason = null, xText = null;
+  if (published && publicNoteUrl) {
+    try {
+      const r = await xAutoPost.postToX({ title: extractTitle(note), publicUrl: publicNoteUrl });
+      xPosted = r.posted; xIntentUrl = r.intentUrl; xPostReason = r.reason || null; xText = r.text;
+      console.log(`[publisher] X自動ポスト: ${xPosted ? '成功' : `未実行(${xPostReason})`}`);
+    } catch (e) {
+      console.warn(`[publisher] X自動ポスト skip: ${e.message}`);
+      xText = xAutoPost.buildShareText(extractTitle(note), publicNoteUrl);
+      xIntentUrl = xAutoPost.intentUrl(xText);
+      xPostReason = e.message;
+    }
+  }
+
   return {
     note, x, date, noteUrl,
     validationFailed: graphsEmbedded < 2,
     chartsIncomplete: graphsEmbedded < 2,
     published,
     graphsGenerated, graphsEmbedded,
+    xPosted, xIntentUrl, xPostReason, xText,
   };
 }
 
