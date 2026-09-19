@@ -666,8 +666,9 @@ async function fetchNavFromYahooLocal(navCode) {
     clearTimeout(tid);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const html = await res.text();
-    // "changePrice" の直前 price = 基準価格（NAV）
-    const m = html.match(/"price":"([\d,]+)","changePrice"/);
+    // 2026-09-18: Yahooのページ構造変更（埋め込みJSON→React CSS Modulesのテーブル表示）に追従
+    // _CommonPriceBoard__price ブロック内の最初の _StyledNumber__value = 基準価格（NAV）
+    const m = html.match(/class="[^"]*_CommonPriceBoard__price[^"]*"[\s\S]{0,400}?_StyledNumber__value[^"]*">([\d,]+)</);
     if (m) {
       const v = parseInt(m[1].replace(/,/g, ''), 10);
       if (v >= 1000 && v <= 999999) return v;
