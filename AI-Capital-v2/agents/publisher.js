@@ -1620,6 +1620,43 @@ async function publish(date) {
     editorReview = await runEditorReview(note, ask);
     console.log(`[publisher] AI編集長レビュー完了: 判定=${editorReview.verdict} 編集長スコア=${editorReview.editorScore ?? 'N/A'}`);
 
+    // ── 編集長REJECTED時の自動再生成（2026-10-29追加・最大1回） ──
+    // 従来は指摘理由が翌日の生成にしか反映されず、同日中は即下書き行きだった。
+    // 指摘理由を修正指示にして1回だけ書き直し、Validator→編集長レビューを再実行する。
+    // 1回に限るのはCPU推論で記事生成が30〜40分かかり、公開時刻が大きくずれ込むため。
+    // 再生成版がValidator NGなら元の版（Validator PASS済み）を保持する。
+    if (editorReview.verdict === 'REJECTED' && editorReview.reasons.length > 0) {
+      console.log('[publisher] AI編集長の指摘を反映して記事を1回だけ再生成します');
+      try {
+        const editorRetryPrompt =
+          `${context}\n\n` +
+          '【前回生成した記事は、AI編集長から以下の理由で公開を見送られました。記事の事実・数値・部署コメントの内容は変えず、' +
+          '指摘された点（最終判断の結論と理由の一貫性、次に取る行動の明示、秘書室長所見とのトーン統一）を改善して記事全文を出力してください】\n' +
+          editorReview.reasons.map(r => `・${r}`).join('\n') +
+          `\n\n【前回生成した記事全文（この内容をベースに指摘箇所のみ修正すること）】\n${note}`;
+        let retried = await generateArticle(editorRetryPrompt);
+        regenerationCount++;
+        const retryFix = autoFixLayout(retried);
+        if (retryFix.changed) {
+          retried = retryFix.note;
+          mechanicalFixCount++;
+          console.log(`[publisher] 機械修正 ${mechanicalFixCount}回目（編集長指摘の再生成後）: ${retryFix.fixesApplied.join(', ')}`);
+        }
+        const retryValidation = validateArticle({ note: retried, pf, candidates, decisions, recs, articleNum, date, financeCtx: ctx.financeCtx });
+        if (retryValidation.ok) {
+          const retryReview = await runEditorReview(retried, ask);
+          console.log(`[publisher] 再生成後のAI編集長レビュー: 判定=${retryReview.verdict} 編集長スコア=${retryReview.editorScore ?? 'N/A'}`);
+          note = retried;
+          validation = retryValidation;
+          editorReview = retryReview;
+        } else {
+          console.warn(`[publisher] 再生成版がValidator NG（警告${retryValidation.warnings.length}件）のため元の版を保持します`);
+        }
+      } catch (err) {
+        console.warn(`[publisher] 編集長指摘による再生成に失敗（${err.message}）→ 元の版を保持します`);
+      }
+    }
+
     if (editorReview.verdict !== 'APPROVED') {
       const reasonsText = editorReview.reasons.length > 0
         ? editorReview.reasons.map(r => `・${r}`).join('\n')

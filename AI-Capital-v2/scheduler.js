@@ -7,6 +7,7 @@ const capitalEvents = require('./lib/capitalEvents');
 const weekly        = require('./agents/weekly');
 const health        = require('./lib/health');
 const xIntent       = require('./lib/xIntent');
+const sheets        = require('./lib/sheets');
 const { isJpHoliday } = require('./lib/jpHolidays');
 
 function todayJST() {
@@ -249,6 +250,47 @@ async function execute(schedule) {
   }
 }
 
+// 起動時キャッチアップ（2026-10-29追加）。PC停止・再起動でcronの発火時刻を丸ごと逃した日に、
+// 未実行のNAV取得（11:30）と日刊会議（12:00）を実行する。
+// 判定は「当日のデータがシートに存在するか」のみ。final_decisionsが既にある日は
+// index.jsのattemptStaleArticleRecovery（記事のみ再試行）の担当なのでここでは触らない。
+// シート読み取りに失敗した場合は「未実行」と決めつけず何もしない（二重実行・誤実行の防止）。
+function jstNowParts() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Tokyo', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const get = t => parts.find(p => p.type === t).value;
+  return { weekday: get('weekday'), minutes: parseInt(get('hour'), 10) * 60 + parseInt(get('minute'), 10) };
+}
+
+async function catchUpMissed() {
+  const today = todayJST();
+  const { weekday, minutes } = jstNowParts();
+  if (['Sat', 'Sun'].includes(weekday) || isJpHoliday(today)) return;
+
+  try {
+    if (minutes >= 11 * 60 + 30) {
+      const navDate = dataFetcher.prevBusinessDayJST();
+      const navRows = await sheets.getRowsByDate('nav_prices', navDate);
+      if (navRows.length === 0) {
+        writeLog('scheduler', `[catch-up] NAV未取得(${navDate})のため実行します`);
+        await executeNav(SCHEDULES.find(s => s.type === 'nav'));
+      }
+    }
+    if (minutes >= 12 * 60) {
+      const decisions = await sheets.getRowsByDate('final_decisions', today);
+      if (decisions.length === 0) {
+        writeLog('scheduler', `[catch-up] 日刊会議が未実行(${today})のため実行します`);
+        await notify(`🔁 起動時キャッチアップ: 本日(${today})の日刊会議が未実行のため実行します`);
+        await execute(SCHEDULES.find(s => !s.type));
+      }
+    }
+  } catch (err) {
+    writeError('scheduler', err);
+    writeLog('scheduler', `[catch-up] 判定に失敗したためスキップします: ${err.message}`);
+  }
+}
+
 function init(client, channel) {
   reportChannel = channel;
 
@@ -260,4 +302,4 @@ function init(client, channel) {
   writeLog('scheduler', '✅ スケジューラー起動完了（AI Capital v2）');
 }
 
-module.exports = { init };
+module.exports = { init, catchUpMissed };

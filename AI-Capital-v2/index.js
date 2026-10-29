@@ -399,6 +399,11 @@ client.once('clientReady', () => {
     );
   }
 
+  // 起動時に逃した定例タスク（NAV取得・日刊会議）のキャッチアップ
+  scheduler.catchUpMissed().catch(err =>
+    console.error('[startup] キャッチアップ処理エラー:', err.message)
+  );
+
   // ── ハートビート（watchdog.js が監視） ─────────────────────
   const heartbeatTick = () => health.writeHeartbeat({
     discordStatus: client.isReady() ? 'connected' : 'disconnected',
