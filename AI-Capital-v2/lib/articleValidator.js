@@ -1107,6 +1107,69 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     }
   }
 
+  // ── Rule 43: 本文の市場描写が、記事冒頭のMarket Check指標と矛盾していないか ───────────
+  // 2026-10-29の実インシデントより新設（Fear&Greed=36「恐怖」なのに審査部が「過熱感を示す」、
+  // 市場環境「堅調」なのに🌍が「不安定」と書いた）。LLM再生成は1回30〜40分かかるため、
+  // 誤検出で公開を止めないよう「明確な矛盾語」だけを対象にし、否定文・条件文（次回の注目点の
+  // 「F&G 55以上 → 強欲圏」等）・Market Check自体の行は除外する。
+  {
+    const fgM  = note.match(/Fear & Greed[：:]\s*(\d+)/);
+    const envM = note.match(/📉 市場環境\s*\n\s*(上昇|堅調|横ばい|調整|下落)/);
+    const fg   = fgM ? parseInt(fgM[1], 10) : null;
+    const env  = envM ? envM[1] : null;
+
+    const NEGATION_RE   = /(ない|ません|見られず|乏しい|とは言えず|とは言えない|いません)/;
+    const CONDITIONAL_RE = /(→|以上|以下|超え|なら|場合|入り|まで)/;
+    const sentencesOf = text => text.split(/\n/).flatMap(l => l.split(/(?<=。)/))
+      .map(s => s.trim()).filter(Boolean)
+      .filter(s => !NEGATION_RE.test(s) && !CONDITIONAL_RE.test(s));
+
+    // 👀 次回の注目点以降（免責含む）と Market Check ブロックは対象外
+    const watchIdx = note.search(/\n👀/);
+    const proseBody = (watchIdx >= 0 ? note.slice(0, watchIdx) : note)
+      .replace(/📊 AI Capital Market Check[\s\S]*?(?=\n📌|\n🌍)/, '');
+
+    // 個別銘柄の過熱感（例「FANG+は短期的な過熱感が」）は正当な記述のため、市場全体を指す語を
+    // 含む文だけを対象にする（2026-10-30: 銘柄単位の記述を誤検出し、6回再生成しても解消せず公開停止した）。
+    const MARKET_WIDE_RE = /(市場|相場|指標|心理|地合い|センチメント|投資家)/;
+    const fearFlagged = [], greedFlagged = [];
+    if (fg != null) {
+      for (const s of sentencesOf(proseBody).filter(x => MARKET_WIDE_RE.test(x))) {
+        if (fg <= 45 && /(過熱(感|気味|している|圏|状態)|強欲(圏|ムード|水準)|楽観(ムード|的な空気|が広が))/.test(s)) fearFlagged.push(s);
+        if (fg >= 56 && /(パニック(売り|的)|悲観(一色|ムード|が広が)|恐怖(が|に)(広が|支配))/.test(s)) greedFlagged.push(s);
+      }
+    }
+    if (fearFlagged.length > 0) {
+      warnings.push(warn(43, `Fear & Greedは${fg}（恐怖圏）なのに、本文が過熱・強欲・楽観を示す表現になっています`,
+        ['Market Check', [`Fear & Greed：${fg}`]],
+        ['矛盾する記述', fearFlagged.slice(0, 3)],
+      ));
+    }
+    if (greedFlagged.length > 0) {
+      warnings.push(warn(43, `Fear & Greedは${fg}（強欲圏）なのに、本文がパニック・悲観を示す表現になっています`,
+        ['Market Check', [`Fear & Greed：${fg}`]],
+        ['矛盾する記述', greedFlagged.slice(0, 3)],
+      ));
+    }
+
+    // 🌍 今日の市場 の描写が「市場環境」ラベルと逆向きでないか
+    if (env) {
+      const marketBody = extractSectionBody(note, [/🌍[ \t]*今日の市場/]);
+      const BAD_FOR_UP   = /(不安定|混乱|荒れ模様|乱高下|急落|軟調)/;
+      const BAD_FOR_DOWN = /(堅調に推移|底堅|上昇基調|力強く上昇)/;
+      const bad = ['上昇', '堅調'].includes(env) ? BAD_FOR_UP : ['調整', '下落'].includes(env) ? BAD_FOR_DOWN : null;
+      if (bad) {
+        const hits = sentencesOf(marketBody).filter(s => bad.test(s));
+        if (hits.length > 0) {
+          warnings.push(warn(43, `「市場環境：${env}」なのに、🌍今日の市場の描写が逆向きの表現になっています`,
+            ['Market Check', [`市場環境：${env}`]],
+            ['矛盾する記述', hits.slice(0, 3)],
+          ));
+        }
+      }
+    }
+  }
+
   return { ok: warnings.length === 0, warnings };
 }
 
