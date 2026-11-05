@@ -1,10 +1,37 @@
 'use strict';
 
 const { getDisplayCandidates, namesMatch } = require('./candidateGroups');
+const { NEGATIVE_EVAL_RE, BRIDGE_RE, CONTRAST_RE } = require('./decisionIntegrity');
 
 // 💴財務戦略部（財前ミナ）見出し検出（publisher.js の FINANCE_HEADING_RE と同義）。Rule 42 で使用。
 // 💴 は小型LLMが落とすことがあるため任意扱い。誤検出防止に「（財前ミナ）」まで要求する。
 const FINANCE_HEADER_RE_V = /^[ \t]*#{0,3}[ \t]*(?:💴[ \t]*)?財務戦略部（財前ミナ）/m;
+
+// ── 自由文判定ルール共通：誤検出除外ヘルパー ─────────────────────────────
+// LLMの自由文を正規表現で判定するルール（11/12/22/24/25/39/43）は、次の文を「その判断を
+// 主張する文」とみなすと誤検出する（2026-10-30 Rule43・2026-11-04 Rule43・2026-11-05 Rule20 の再発防止）。
+//   NEG   : 否定（「過熱感ではなく」「暴落とは言えない」「対立はなかった」）
+//   Q     : 疑問・論点提示（「SOXを採用するかが論点」）
+//   VIEW  : 他者・少数意見の紹介（「黒崎は分散を重視する立場から反対」「審査部は様子見を支持」）
+const SKIP_NEG  = /(ない|ません|なかった|なく[、。]|ず[、。に]|見られず|乏しい|とは言え|ではなく|でなく|ではあり|というより|いません)/;
+const SKIP_Q    = /(かどうか|べきか|のか[、。が]|でしょうか|か[、。]?$|かが(論点|焦点|争点))/;
+const SKIP_VIEW = /(意見|主張|指摘|立場|懸念|反対|支持|声が|氏[はがの]|神谷[はがの]|黒崎[はがの]|アオイ[はがの]|橘[はがの]|鬼塚[はがの]|(審査|リスク管理|マーケット分析|ポートフォリオ管理)部[はがの])/;
+
+function splitSentences(text) {
+  return String(text ?? '').split(/\n/).flatMap(l => l.split(/(?<=。)/)).map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * text 中で re に一致する文のうち、skips のいずれにも該当しないものを返す（なければ null）。
+ * @returns {{sentence: string, match: RegExpMatchArray} | null}
+ */
+function findAssertion(text, re, skips = [SKIP_NEG, SKIP_Q]) {
+  for (const sentence of splitSentences(text)) {
+    const match = sentence.match(re);
+    if (match && !skips.some(sk => sk.test(sentence))) return { sentence, match };
+  }
+  return null;
+}
 
 /**
  * articleValidator.js — 公開前記事整合性監査
@@ -344,11 +371,11 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     // B-1: 他の候補が「採用/選択/決定/選定」されたと明言している（実際と異なる銘柄）
     for (const otherName of otherAssetNames) {
       const wrongDecisionRe = new RegExp(`${escapeRegExp(otherName)}[^\\n。]{0,10}を(採用|選択|決定|選定)`);
-      const m = rule11CombinedText.match(wrongDecisionRe);
-      if (m) {
+      const hit = findAssertion(rule11CombinedText, wrongDecisionRe, [SKIP_NEG, SKIP_Q, SKIP_VIEW]);
+      if (hit) {
         warnings.push(warn(11, `結論系セクションが実際と異なる銘柄（${otherName}）を採用したと記載しています`,
           ['最終判断銘柄', [`・${finalAsset}`]],
-          ['検出した記述', [m[0]]],
+          ['検出した記述', [hit.match[0]]],
         ));
       }
     }
@@ -362,7 +389,8 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     const GROWTH_CLAIM_RE    = /(成長性|攻め|モメンタム|積極性)を(最優先|優先|重視)/;
 
     if (finalCategory === 'growth') {
-      const m = rule11CombinedText.match(STABILITY_CLAIM_RE);
+      const hit = findAssertion(rule11CombinedText, STABILITY_CLAIM_RE, [SKIP_NEG, SKIP_Q, SKIP_VIEW]);
+      const m = hit?.match;
       if (m) {
         warnings.push(warn(11, `結論系セクションが守り重視の判断だったと記載していますが、実際の採用銘柄は成長（Growth）カテゴリです`,
           ['最終判断銘柄', [`・${finalAsset}（Growthカテゴリ）`]],
@@ -370,7 +398,8 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
         ));
       }
     } else if (finalCategory === 'defense') {
-      const m = rule11CombinedText.match(GROWTH_CLAIM_RE);
+      const hit = findAssertion(rule11CombinedText, GROWTH_CLAIM_RE, [SKIP_NEG, SKIP_Q, SKIP_VIEW]);
+      const m = hit?.match;
       if (m) {
         warnings.push(warn(11, `結論系セクションが攻め重視の判断だったと記載していますが、実際の採用銘柄は防御（Defense）カテゴリです`,
           ['最終判断銘柄', [`・${finalAsset}（Defenseカテゴリ）`]],
@@ -419,7 +448,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
         ['部署投票', recs.map(r => `${r.department} → ${r.recommendation_type || r.action}${r.asset_name && r.asset_name !== 'なし' ? ' ' + r.asset_name : ''}`)],
       ));
     }
-    if (/意見が割れ|割れた|対立|賛否両論/.test(combinedText) && hasRealConsensus) {
+    if (hasRealConsensus && findAssertion(combinedText, /意見が割れ|割れた|対立|賛否両論/)) {
       warnings.push(warn(12, '「意見が割れた」等の表現が実際の部署投票と矛盾しています',
         ['部署投票', recs.map(r => `${r.department} → ${r.recommendation_type || r.action}${r.asset_name && r.asset_name !== 'なし' ? ' ' + r.asset_name : ''}`)],
       ));
@@ -520,9 +549,9 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   const gaiBody = extractDeptBody(DEPT_HEADERS.gai.pattern);
   if (gaiBody) {
     const missing = [];
-    if (activeRecDepts.has('マーケット分析部') && !/神谷の/.test(gaiBody)) missing.push('神谷の〜については');
-    if (activeRecDepts.has('リスク管理部') && !/黒崎の/.test(gaiBody)) missing.push('黒崎の〜については');
-    if (activeRecDepts.has('ポートフォリオ管理部') && !/(アオイの|橘の)/.test(gaiBody)) missing.push('アオイの〜については');
+    if (activeRecDepts.has('マーケット分析部') && !/(神谷の|マーケット分析部)/.test(gaiBody)) missing.push('神谷の〜については');
+    if (activeRecDepts.has('リスク管理部') && !/(黒崎の|リスク管理部)/.test(gaiBody)) missing.push('黒崎の〜については');
+    if (activeRecDepts.has('ポートフォリオ管理部') && !/(アオイの|橘の|ポートフォリオ管理部)/.test(gaiBody)) missing.push('アオイの〜については');
     if (missing.length > 0) {
       warnings.push(warn(20, '鬼塚ガイの要約に、その日登場した部署への審査コメントが揃っていません',
         ['不足', missing],
@@ -546,7 +575,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   for (const [name, body] of [['黒崎ミサキ', misakiBody2], ['橘アオイ', aoiBody]]) {
     if (!body) continue;
     const concMatch = body.match(/集中投資率[^\d]{0,4}([\d.]+)%/);
-    if (concMatch && parseFloat(concMatch[1]) < 15 && EXAGGERATION_WORDS.test(body)) {
+    if (concMatch && parseFloat(concMatch[1]) < 15 && findAssertion(body, EXAGGERATION_WORDS)) {
       warnings.push(warn(22, `${name}の要約が低水準の集中投資率（${concMatch[1]}%）に対して誇張表現を使っています`,
         ['本文抜粋', [body.slice(0, 150)]],
       ));
@@ -591,7 +620,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   if (vixMatch && parseFloat(vixMatch[1]) < 20) {
     const idx = note.indexOf(vixMatch[0]);
     const ctx = note.slice(Math.max(0, idx - 100), idx + 300);
-    if (STRONG_EXAGGERATION.test(ctx)) {
+    if (findAssertion(ctx, STRONG_EXAGGERATION)) {
       warnings.push(warn(24, `VIXが${vixMatch[1]}（平穏〜通常レンジ）にもかかわらず、誇張した評価表現が近傍に使われています`,
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
       ));
@@ -603,7 +632,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   if (fgMatch && parseFloat(fgMatch[1]) > 25) {
     const idx = note.indexOf(fgMatch[0]);
     const ctx = note.slice(Math.max(0, idx - 60), idx + 300);
-    if (/(パニック的|極端な恐怖状態|市場崩壊)/.test(ctx)) {
+    if (findAssertion(ctx, /(パニック的|極端な恐怖状態|市場崩壊)/)) {
       warnings.push(warn(24, `Fear & Greedが${fgMatch[1]}（極端な恐怖ではない）にもかかわらず、パニック的な表現が使われています`,
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
       ));
@@ -615,7 +644,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   if (cashRatioMatch && parseFloat(cashRatioMatch[1]) >= 50) {
     const idx = note.indexOf(cashRatioMatch[0]);
     const ctx = note.slice(Math.max(0, idx - 100), idx + 300);
-    if (/(資金枯渇|極めて逼迫|深刻な資金不足|資金が尽き)/.test(ctx)) {
+    if (findAssertion(ctx, /(資金枯渇|極めて逼迫|深刻な資金不足|資金が尽き)/)) {
       warnings.push(warn(24, `現金比率が${cashRatioMatch[1]}%（余力あり）にもかかわらず、資金逼迫を示唆する表現が使われています`,
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
       ));
@@ -626,7 +655,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   for (const m of note.matchAll(/ATH乖離[^\d\-]{0,4}(-?[\d.]+)%/g)) {
     if (Math.abs(parseFloat(m[1])) < 3) {
       const ctx = note.slice(Math.max(0, m.index - 60), m.index + 200);
-      if (/(暴落|崩壊的|壊滅的)/.test(ctx)) {
+      if (findAssertion(ctx, /(暴落|崩壊的|壊滅的)/)) {
         warnings.push(warn(24, `ATH乖離率が${m[1]}%（高値圏に近い）にもかかわらず、暴落を示唆する表現が使われています`,
           ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
         ));
@@ -638,7 +667,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   for (const m of note.matchAll(/ポートフォリオ比率[^\d]{0,4}([\d.]+)%/g)) {
     if (parseFloat(m[1]) < 15) {
       const ctx = note.slice(Math.max(0, m.index - 60), m.index + 200);
-      if (STRONG_EXAGGERATION.test(ctx)) {
+      if (findAssertion(ctx, STRONG_EXAGGERATION)) {
         warnings.push(warn(24, `ポートフォリオ比率が${m[1]}%（低水準）にもかかわらず、誇張した評価表現が使われています`,
           ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
         ));
@@ -658,10 +687,11 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   const isWaitSignal = finalSignal === 'WAIT';
 
   if (isBuySignal) {
-    const waitMatches = conclusionText.match(new RegExp(WAIT_EXPRESSIONS, 'g'));
-    if (waitMatches && waitMatches.length > 0) {
-      const idx = conclusionText.search(WAIT_EXPRESSIONS);
-      const ctx = conclusionText.slice(Math.max(0, idx - 100), idx + 200);
+    const waitSentences = splitSentences(conclusionText)
+      .filter(x => WAIT_EXPRESSIONS.test(x) && ![SKIP_NEG, SKIP_Q, SKIP_VIEW].some(sk => sk.test(x)));
+    const waitMatches = waitSentences.flatMap(x => x.match(new RegExp(WAIT_EXPRESSIONS, 'g')) ?? []);
+    if (waitMatches.length > 0) {
+      const ctx = waitSentences.join(' ').slice(0, 300);
       warnings.push(warn(25, `最終判断が${finalSignal}（買付実行）にもかかわらず、記事内に様子見・見送りを示す表現が含まれています`,
         ['検出表現', [...new Set(waitMatches)]],
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
@@ -670,10 +700,11 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   }
 
   if (isWaitSignal) {
-    const execMatches = conclusionText.match(new RegExp(EXECUTE_EXPRESSIONS, 'g'));
-    if (execMatches && execMatches.length > 0) {
-      const idx = conclusionText.search(EXECUTE_EXPRESSIONS);
-      const ctx = conclusionText.slice(Math.max(0, idx - 100), idx + 200);
+    const execSentences = splitSentences(conclusionText)
+      .filter(x => EXECUTE_EXPRESSIONS.test(x) && ![SKIP_NEG, SKIP_Q, SKIP_VIEW].some(sk => sk.test(x)));
+    const execMatches = execSentences.flatMap(x => x.match(new RegExp(EXECUTE_EXPRESSIONS, 'g')) ?? []);
+    if (execMatches.length > 0) {
+      const ctx = execSentences.join(' ').slice(0, 300);
       warnings.push(warn(25, `最終判断がWAIT（見送り）にもかかわらず、記事内に買付・観測ポジション構築の実行を示す表現が含まれています`,
         ['検出表現', [...new Set(execMatches)]],
         ['本文抜粋', [ctx.replace(/\s+/g, ' ').slice(0, 200)]],
@@ -819,18 +850,13 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
   {
     const gaiBody33 = extractDeptBody(DEPT_HEADERS.gai.pattern);
     if (gaiBody33) {
-      const NEGATIVE_EVAL_RE = /(神谷|黒崎|アオイ|橘|鬼塚)の[^。\n]{0,20}(過大(?:評価)?|過小(?:評価)?|根拠不足|論理破綻|説得力に欠け|不十分|バイアス)/;
       const POSITIVE_LABEL_RE = /判断[：:][^\n]{0,10}(支持|推奨)/;
       // 「様子見支持」「慎重姿勢を支持」等は買付・積極提案への“積極支持”ではなく待機・慎重側の
       // 結論であり、否定評価と矛盾しない（Phase2.8修正：POSITIVE_LABEL_REが「支持」の文字列
       // だけで積極支持と誤認していたため分離）。判断ラベル周辺にこれらの語があれば対象外とする。
       const CAUTIOUS_LABEL_RE = /判断[：:][^\n]{0,10}(様子見|慎重姿勢|静観|待機|見送り)/;
-      // 「ただし」等の逆接だけでなく、「そのため〜という形で」のように懸念を踏まえて
-      // 実行方法（金額縮小・分散・積立化等）を調整した結果としての結論も橋渡しとみなす。
-      // 「しかし」も同種の自然な逆接表現だが従来抜けていたため2026-08-09追加（Phase2.9で
-      // 「神谷の主張は根拠不足。しかし、短期的な上昇余地はある。よって支持する」のような
-      // 正当な橋渡し文をRule33が誤検知していたことが判明したため）。
-      const BRIDGE_RE = /(ただし|とはいえ|それでも|一方で|なお|とはいうものの|であっても|とはいうもの|という形で|踏まえ|留意し|意識しつつ|縮小|限定的|しかし)/;
+      // NEGATIVE_EVAL_RE / BRIDGE_RE は decisionIntegrity.js と共有（Step4発注前チェックと
+      // 同じ判定基準を使うため。2026-09-29に「考慮しつつ」追加はそちら側で行った）。
       const negMatch = gaiBody33.match(NEGATIVE_EVAL_RE);
       if (negMatch && POSITIVE_LABEL_RE.test(gaiBody33) && !CAUTIOUS_LABEL_RE.test(gaiBody33) && !BRIDGE_RE.test(gaiBody33)) {
         warnings.push(warn(33, '審査部が特定部署の主張を否定的に評価しながら、その評価と結論（支持／推奨）の間に理由の橋渡しがありません',
@@ -874,7 +900,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
       const targetText = `${conclusionText}\n${finalDecisionBody}`;
       const mentionsTopCandidate = targetText.includes(topCandidate.asset_name) ||
         (topCandidate.full_name && targetText.includes(topCandidate.full_name));
-      const CONTRAST_RE = /(一方|しかし|ものの|とはいえ|それでも|見送|至らな|優先し|上回り|下回り|重視し|判断しました|根拠が不足|採用には至らな)/;
+      // CONTRAST_RE は decisionIntegrity.js と共有（Step4発注前チェックと同じ判定基準）。
       if (!mentionsTopCandidate || !CONTRAST_RE.test(targetText)) {
         warnings.push(warn(35, 'Rule Engineの1位候補が最終採用されていませんが、記事内にその理由の説明が見当たりません',
           ['Rule Engine1位', [`・${topCandidate.asset_name}（スコア${topCandidate.score ?? '—'}）`]],
@@ -997,7 +1023,9 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
 
       for (const otherName of otherAssetNames) {
         const re = new RegExp(`${escapeRegExp(otherName)}[^。\\n]{0,15}${PROPOSE_VERB}`);
-        const m = summaryOnly.match(re);
+        // 他部署の提案を紹介する文（「黒崎氏がS&P500を推奨するのに対し…」）は自分の提案ではない
+        const hit = findAssertion(summaryOnly, re, [SKIP_NEG, SKIP_VIEW]);
+        const m = hit?.match;
         if (m) {
           warnings.push(warn(39, `${r.department}の要約が、実際の推奨資産（${asset}）と異なる資産（${otherName}）を提案として記載しています`,
             ['実際の推奨資産（department_recommendations）', [asset]],
@@ -1118,7 +1146,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     const fg   = fgM ? parseInt(fgM[1], 10) : null;
     const env  = envM ? envM[1] : null;
 
-    const NEGATION_RE   = /(ない|ません|見られず|乏しい|とは言えず|とは言えない|いません)/;
+    const NEGATION_RE   = /(ない|ません|見られず|乏しい|とは言えず|とは言えない|いません|ではなく|でなく|ではあり|というより)/;
     const CONDITIONAL_RE = /(→|以上|以下|超え|なら|場合|入り|まで)/;
     const sentencesOf = text => text.split(/\n/).flatMap(l => l.split(/(?<=。)/))
       .map(s => s.trim()).filter(Boolean)
@@ -1135,7 +1163,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     const fearFlagged = [], greedFlagged = [];
     if (fg != null) {
       for (const s of sentencesOf(proseBody).filter(x => MARKET_WIDE_RE.test(x))) {
-        if (fg <= 45 && /(過熱(感|気味|している|圏|状態)|強欲(圏|ムード|水準)|楽観(ムード|的な空気|が広が))/.test(s)) fearFlagged.push(s);
+        if (fg <= 45 && /(過熱(感|気味|し(て|ま)|圏|状態)|強欲(圏|ムード|水準)|楽観(ムード|的な空気|が広が))/.test(s)) fearFlagged.push(s);
         if (fg >= 56 && /(パニック(売り|的)|悲観(一色|ムード|が広が)|恐怖(が|に)(広が|支配))/.test(s)) greedFlagged.push(s);
       }
     }
@@ -1159,7 +1187,7 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
       const BAD_FOR_DOWN = /(堅調に推移|底堅|上昇基調|力強く上昇)/;
       const bad = ['上昇', '堅調'].includes(env) ? BAD_FOR_UP : ['調整', '下落'].includes(env) ? BAD_FOR_DOWN : null;
       if (bad) {
-        const hits = sentencesOf(marketBody).filter(s => bad.test(s));
+        const hits = sentencesOf(marketBody).filter(s => bad.test(s) && /(市場|相場|指標|心理|地合い|センチメント|投資家|株式|株価|指数|全体)/.test(s));
         if (hits.length > 0) {
           warnings.push(warn(43, `「市場環境：${env}」なのに、🌍今日の市場の描写が逆向きの表現になっています`,
             ['Market Check', [`市場環境：${env}`]],
