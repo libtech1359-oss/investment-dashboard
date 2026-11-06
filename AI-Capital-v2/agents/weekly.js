@@ -832,9 +832,19 @@ async function buildWeeklyDraft(startDate, endDate) {
     sections.push(await section.build(data));
   }
 
+  // 特別号アーカイブ案内（日刊 publisher.js 後処理㉖と同じ文面・構成）。
+  // ▼HR▼ は noteDraft.js が区切り線<hr>に変換する専用マーカー（Markdownの --- は週刊Validator W10で禁止）。
   const footer = [
     '',
-    '---',
+    '▼HR▼',
+    '',
+    '📚 AI Capitalの裏側、覗いてみませんか？',
+    'AI Capitalが生まれたきっかけ、開発環境、AIによる投資判断の仕組みなど、4本の特別号にまとめています。',
+    '',
+    'https://note.com/aicapital_jp/m/mcd7d53c36601',
+    '',
+    '▼HR▼',
+    '',
     'AI Capitalは投資助言サービスではありません。AI社員による意思決定の記録を公開するプロジェクトです。投資判断はご自身の責任でお願いします。',
   ].join('\n');
 
