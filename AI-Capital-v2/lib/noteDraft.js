@@ -258,6 +258,8 @@ function textToEditorHtml(text) {
     .split(/\n{2,}/)
     .filter(seg => seg.trim())
     .map(seg => {
+      // `▼HR▼` だけの段落はnoteの区切り線（<hr>）にする（Markdownの `---` は記事検証Rule 9で禁止のため専用マーカー）
+      if (seg.trim() === '▼HR▼') return '<hr>';
       const inner = seg.split('\n').map(esc).join('<br>');
       return `<p>${inner}</p>`;
     })

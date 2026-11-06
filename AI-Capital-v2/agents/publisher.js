@@ -1122,6 +1122,12 @@ function applyPostProcessing(rawNote, ctx) {
   {
     const marketCheckRe = /#{0,2}\s*📊\s*AI Capital Market Check[\s\S]*?(?=\n#{0,2}\s*(?:📌|🌍|🎯|🏢|💴|⚖️|🔴|💰|👀|👑)|$)/g;
     note = note.replace(marketCheckRe, '').replace(/\n{3,}/g, '\n\n');
+    // 見出し「📊 AI Capital Market Check」を欠いた4項目だけの複製（LLMが前回記事のブロックを
+    // 見出しなしで写すことがある）は上の正規表現では消えず、機械挿入ブロックと併せて
+    // 「Fear & Greed：20（極端な恐怖）」等がRule28の重複になっていた（2026-11-06判明）。
+    // 4項目（投資家心理・市場環境・リスク・為替）が揃った塊を、挿入前に全て除去する。
+    const headerlessRe = /😨 投資家心理\s*\nFear & Greed[：:][^\n]*\n+📉 市場環境\s*\n[^\n]*\n+⚠️ リスク\s*\nVIX[：:][^\n]*\n+💵 為替\s*\nUSD\/JPY[：:][^\n]*\n*/g;
+    note = note.replace(headerlessRe, '').replace(/\n{3,}/g, '\n\n');
   }
   if (mkt && note.includes('📋')) {
     const checkBlock = buildMarketCheckBlock(mkt);
@@ -1138,12 +1144,6 @@ function applyPostProcessing(rawNote, ctx) {
   // （LLMが実際の推奨（WAIT/DEFEND＝見送り）を無視し、買付方向の判断ラベルを書いてしまうケースの安全網。
   //   要約本文には手を加えず、矛盾したラベル語のみを置き換える。以前は審査部のみ対象だったが、
   //   同種の矛盾は他部署でも起こり得るため2026-08-13に全部署へ一般化した）
-    // 見出し「📊 AI Capital Market Check」を欠いた4項目だけの複製（LLMが前回記事のブロックを
-    // 見出しなしで写すことがある）は上の正規表現では消えず、機械挿入ブロックと併せて
-    // 「Fear & Greed：20（極端な恐怖）」等がRule28の重複になっていた（2026-11-06判明）。
-    // 4項目（投資家心理・市場環境・リスク・為替）が揃った塊を、挿入前に全て除去する。
-    const headerlessRe = /😨 投資家心理\s*\nFear & Greed[：:][^\n]*\n+📉 市場環境\s*\n[^\n]*\n+⚠️ リスク\s*\nVIX[：:][^\n]*\n+💵 為替\s*\nUSD\/JPY[：:][^\n]*\n*/g;
-    note = note.replace(headerlessRe, '').replace(/\n{3,}/g, '\n\n');
   for (const dept of Object.keys(DEPT_HEADER_META)) {
     const header = findDeptHeader(note, dept);
     if (!header) continue;
@@ -1325,6 +1325,42 @@ function applyPostProcessing(rawNote, ctx) {
     note = note.trimEnd() + '\n\n' + DISCLAIMER_3LINES;
   }
 
+  // 後処理㉖: 特別号アーカイブ案内を免責事項の「直前」に機械挿入（固定文・冪等）
+  // 免責事項は常に記事の最後に置く。再生成ループで複数回通っても重複しないよう、
+  // 既存の案内ブロックを除去してから付け直す。
+  {
+    const GUIDE_URL = 'https://note.com/aicapital_jp/m/mcd7d53c36601';
+    const GUIDE_MARK = 'AI Capitalの裏側、覗いてみませんか？';
+    // 本編との区切り（▼HR▼＝noteDraftで区切り線<hr>に変換。Markdownの `---` はRule 9の禁止対象）＋見出し付き。リンクカードのタイトルと重複する「特別号アーカイブ」行は置かない。
+    const SPECIAL_GUIDE =
+      '▼HR▼\n\n' +
+      '📚 ' + GUIDE_MARK + '\n' +
+      'AI Capitalが生まれたきっかけ、開発環境、AIによる投資判断の仕組みなど、4本の特別号にまとめています。\n\n' +
+      GUIDE_URL + '\n\n' +
+      '▼HR▼';
+
+    const disclaimerIdx = findDisclaimerIndex(note);
+    if (disclaimerIdx >= 0) {
+      let head = note.slice(0, disclaimerIdx);
+      const tail = note.slice(disclaimerIdx);
+      // 既存の案内ブロック（前後の区切り線・見出し絵文字・旧版の行も含め、見出し〜URLまで）だけを
+      // 範囲指定で除去する。以降の内容（免責事項直前に挿入される▼CHART▼等）を巻き込まないよう、
+      // 末尾切り落としはしない。
+      const mark = head.indexOf(GUIDE_MARK);
+      const urlPos = mark >= 0 ? head.indexOf(GUIDE_URL, mark) : -1;
+      if (urlPos >= 0) {
+        let pre = head.slice(0, mark);
+        if (pre.endsWith('📚 ')) pre = pre.slice(0, -3);
+        pre = pre.trimEnd();
+        if (pre.endsWith('▼HR▼')) pre = pre.slice(0, -4);
+        let post = head.slice(urlPos + GUIDE_URL.length).trimStart();
+        if (post.startsWith('▼HR▼')) post = post.slice(4);
+        head = pre + (post ? '\n\n' + post.trimStart() : '');
+      }
+      note = head.trimEnd() + '\n\n' + SPECIAL_GUIDE + '\n\n' + tail;
+    }
+  }
+
   return note;
 }
 
@@ -1341,33 +1377,6 @@ async function publish(date) {
   const mkt = await sheets.getLatestRowAsOf('market_data', date).catch(() => null);
 
   // ── portfolio_status 整合性チェック（cash + pending + invested === total_assets）
-  // 後処理㉖: 特別号アーカイブ案内を免責事項の「直前」に機械挿入（固定文・冪等）
-  // 免責事項は常に記事の最後に置く。再生成ループで複数回通っても重複しないよう、
-  // 既存の案内ブロックを除去してから付け直す。
-  {
-    const GUIDE_URL = 'https://note.com/aicapital_jp/m/mcd7d53c36601';
-    const SPECIAL_GUIDE =
-      'AI Capitalの裏側、覗いてみませんか？\n' +
-      'AI Capitalが生まれたきっかけ、開発環境、AIによる投資判断の仕組みなど、4本の特別号にまとめています。\n\n' +
-      'AI Capital｜特別号アーカイブ\n\n' +
-      GUIDE_URL;
-
-    const disclaimerIdx = findDisclaimerIndex(note);
-    if (disclaimerIdx >= 0) {
-      let head = note.slice(0, disclaimerIdx);
-      const tail = note.slice(disclaimerIdx);
-      // 既存の案内ブロック（見出し〜URL）だけを範囲指定で除去する。以降の内容
-      // （免责事項直前に挿入される▼CHART▼等）を巻き込まないよう、末尾切り落としはしない。
-      const guideStart = head.indexOf('AI Capitalの裏側、覗いてみませんか？');
-      if (guideStart >= 0) {
-        const urlPos = head.indexOf(GUIDE_URL, guideStart);
-        const guideEnd = urlPos >= 0 ? urlPos + GUIDE_URL.length : head.length;
-        head = head.slice(0, guideStart) + head.slice(guideEnd);
-      }
-      note = head.trimEnd() + '\n\n' + SPECIAL_GUIDE + '\n\n' + tail;
-    }
-  }
-
   if (pf) {
     const t   = parseInt(pf.total_assets || 0);
     const c   = parseInt(pf.cash         || 0);
