@@ -341,16 +341,75 @@ function matchAsset(recAssetName, candidate) {
          matchesOne(recAssetName, candidate.full_name);
 }
 
+// ── 小口買付: ポートフォリオ管理部（アオイ）の実効票を決める ───────────────
+// アオイは他部署の票を見られない（マーケット/リスクと並列投票・審査部は後続）ため、
+// 「現金比率が下限〜20%の間では、Fear&Greed<=30 かつ 他3部署の買い票>=2 のときだけ
+// アオイの買い票を有効にする」という条件は、全票が揃ったここで判定する。
+// 満たさないときはアオイの票を WAIT 扱いに置換した「実効票」を返す（元のagent_votesは変更しない）。
+// pf/mktを取得できない・現金比率が数値化できない場合は票を一切いじらない（既存挙動を維持）。
+async function applyPortfolioVoteGuard(date, rawVotes) {
+  const none = { votes: rawVotes, downgraded: false, note: '' };
+  const aoiIdx = rawVotes.findIndex(v => v.department === cashFloor.PORTFOLIO_DEPT);
+  if (aoiIdx < 0) return none;
+  const aoiSignal = (rawVotes[aoiIdx].signal ?? '').toUpperCase();
+  if (!cashFloor.BUY_SIGNALS.has(aoiSignal)) return none;
+
+  const [pf, mkt] = await Promise.all([
+    sheets.getLatestRowAsOf('portfolio_status', date).catch(() => null),
+    sheets.getLatestRowAsOf('market_data', date).catch(() => null),
+  ]);
+  if (!pf) return none;
+
+  const crash = cashFloor.isCrashSignal({
+    fearGreed:       mkt ? mkt.fear_greed : undefined,
+    nasdaqChangePct: mkt ? mkt.nasdaq100  : undefined,
+  });
+  const otherBuyVotes = rawVotes.filter((v, i) =>
+    i !== aoiIdx && cashFloor.BUY_SIGNALS.has((v.signal ?? '').toUpperCase())).length;
+
+  const r = cashFloor.resolvePortfolioVote({
+    signal:       aoiSignal,
+    cashRatioPct: pf.cash_ratio,
+    fearGreed:    mkt ? mkt.fear_greed : undefined,
+    crashSignal:  crash,
+    otherBuyVotes,
+  });
+  if (!r.downgraded) return none;
+
+  console.log(`[signalAggregator] 小口買付: ポートフォリオ管理部の買い票をWAIT扱い（現金比率${pf.cash_ratio}% F&G=${mkt ? mkt.fear_greed : 'N/A'} 他部署の買い票=${otherBuyVotes}）`);
+  return {
+    votes: rawVotes.map((v, i) => (i === aoiIdx ? { ...v, signal: 'WAIT' } : v)),
+    downgraded: true,
+    note: r.note,
+  };
+}
+
+// 信頼度加重の正規化スコア（run() 内の Step 1 と同じ式）。実効票へ置換する前の票でのスコア比較用。
+function scoreOfVotes(list) {
+  let weightedSum = 0, totalConf = 0;
+  for (const v of list) {
+    const signal = (v.signal ?? '').toUpperCase();
+    const conf   = parseFloat(v.confidence) || 50;
+    weightedSum += (SIGNAL_WEIGHT[signal] ?? 0) * (conf / 100);
+    totalConf   += conf / 100;
+  }
+  return totalConf > 0 ? weightedSum / totalConf : 0;
+}
+
 async function run(date) {
   date = date ?? todayJST();
 
-  const votes = await sheets.getRowsByDate('agent_votes', date);
+  const rawVotes = await sheets.getRowsByDate('agent_votes', date);
 
-  if (votes.length === 0) {
+  if (rawVotes.length === 0) {
     const result = { date, final_signal: 'WAIT', target_asset: '', amount: '', reason: '投票なし（エージェント未実行）' };
     await sheets.upsertRow('final_decisions', ['date'], result);
     return result;
   }
+
+  // ── Step 0: 小口買付 — アオイの実効票（条件を満たさない買い票はWAIT扱い）──
+  const portfolioGuard = await applyPortfolioVoteGuard(date, rawVotes);
+  const votes = portfolioGuard.votes;
 
   // ── Step 1: 加重スコア計算でシグナル決定 ──────────────────────
   let weightedSum = 0;
@@ -388,6 +447,13 @@ async function run(date) {
     } else {
       waitReasonOverride = tieBreakResult.note;
     }
+  }
+
+  // アオイの買い票をWAIT扱いにしたことで買付水準(0.5)を下回った場合は、その理由を説明に残す
+  // （2対2タイブレークなど既存の理由がある場合はそちらを優先し、上書きしない）
+  if (portfolioGuard.downgraded && !waitReasonOverride) {
+    const rawScore = scoreOfVotes(rawVotes);
+    if (rawScore >= 0.5 && normalizedScore < 0.5) waitReasonOverride = portfolioGuard.note;
   }
 
   // ── Step 1.5: WAIT見送り防止（観測ポジション構築への切替判定）─────
@@ -477,7 +543,9 @@ async function run(date) {
         const validRecs = recs.filter(r => {
           const action = (r.recommendation_type || r.action || '').toUpperCase();
           return BUY_ACTIONS.has(action) &&
-            r.asset_name && r.asset_name !== 'なし' && parseInt(r.amount || 0) > 0;
+            r.asset_name && r.asset_name !== 'なし' && parseInt(r.amount || 0) > 0 &&
+            // 小口買付: 票をWAIT扱いにしたアオイの推薦は銘柄選定・金額平均に混ぜない
+            !(portfolioGuard.downgraded && r.department === cashFloor.PORTFOLIO_DEPT);
         });
         // 信頼度加重の合計（voteScoreの正規化に使用。頭数ではなく信頼度で重み付けする）
         const totalConfWeight = validRecs.reduce((s, r) => s + (parseFloat(r.confidence) || 50) / 100, 0) || 1;
@@ -646,6 +714,7 @@ async function run(date) {
             baseAmount:   parseInt(amount, 10),
             crashSignal:  crash,
           });
+          let amountNote = '';
           if (budget.amount !== parseInt(amount, 10)) {
             console.log(
               `[signalAggregator] 現金フロア: ¥${parseInt(amount).toLocaleString()} → ¥${budget.amount.toLocaleString()} ` +
@@ -658,10 +727,45 @@ async function run(date) {
               assetReason       = budget.note;
               waitReasonOverride = budget.note;
             } else {
-              amount      = String(budget.amount);
-              assetReason = `${assetReason} ${budget.note}`.trim();
+              amount     = String(budget.amount);
+              amountNote = budget.note;
             }
           }
+
+          // ── 小口キャップ（現金フロア適用「後」の最終金額に対して上限をかける）─────
+          // 現金比率が下限〜20%の間は、通常¥10,000／強根拠¥30,000（暴落時の5〜10%帯は¥10,000固定）が上限。
+          // 部署の推薦額の平均がいくら大きくても超えない。強根拠は「実効スコア>=0.75 かつ
+          // 採用銘柄自身のRule Engineスコア(0-100)>=20」。発注最小額¥1,000は変更しない。
+          if (amount) {
+            const adopted = candidates.find(c => c.asset_name === target_asset);
+            const lot = cashFloor.resolveSmallLotAmount({
+              cashRatioPct: pf.cash_ratio,
+              cashJpy:      pf.cash,
+              amount:       parseInt(amount, 10),
+              crashSignal:  crash,
+              voteScore:    normalizedScore,
+              ruleScore:    adopted ? adopted.score : undefined,
+            });
+            if (lot.applied) {
+              console.log(
+                `[signalAggregator] 小口キャップ: ¥${parseInt(amount).toLocaleString()} → ¥${lot.amount.toLocaleString()} ` +
+                `(現金比率${pf.cash_ratio}% 上限¥${(lot.cap ?? 0).toLocaleString()}${lot.strong ? ' 強根拠' : ''}${crash ? ' 暴落例外ON' : ''} ` +
+                `実効スコア=${normalizedScore.toFixed(3)} 採用銘柄Rule=${adopted ? adopted.score : 'N/A'})`,
+              );
+              if (lot.amount === 0) {
+                final_signal      = 'WAIT';
+                target_asset      = '';
+                amount            = '';
+                assetReason       = lot.note;
+                waitReasonOverride = lot.note;
+                amountNote        = '';
+              } else {
+                amount     = String(lot.amount);
+                amountNote = lot.note; // 途中経過の現金フロア額ではなく、最終額の説明に一本化する
+              }
+            }
+          }
+          if (amountNote) assetReason = `${assetReason} ${amountNote}`.trim();
         }
 
         if (observation) {

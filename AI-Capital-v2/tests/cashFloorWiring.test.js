@@ -82,14 +82,16 @@ test('W1 現金比率25%（SOFT超）→ 買付額そのまま・BUY維持', asy
   assert.equal(d.amount, '30000');
 });
 
-test('W2 現金比率15%（逓減帯）→ factor0.5 で 15,000 に抑制・BUY維持', async () => {
+test('W2 現金比率15%（逓減帯）→ 現金フロア factor0.5 の 15,000 に、さらに小口キャップ ¥10,000 を適用・BUY維持', async () => {
+  // 2026-11-06 小口買付の確定仕様: 現金フロア適用後の最終金額に小口キャップ（通常¥10,000）をかける。
+  // 以前は 15,000（フロアのみ）が期待値だったが、キャップが上限として効く。シグナル(BUY)・銘柄は不変。
   const get = install({ cashRatio: 15 });
   await agg.run('2026-09-08');
   const d = get();
   assert.equal(d.final_signal, 'BUY');
   assert.equal(d.target_asset, 'S&P500');
-  assert.equal(d.amount, '15000');
-  assert.match(d.reason, /現金フロア/);
+  assert.equal(d.amount, '10000');
+  assert.match(d.reason, /小口買付/);
 });
 
 test('W3 現金比率8%・暴落なし（HARD以下）→ 買付ゼロ → WAIT へ降格', async () => {

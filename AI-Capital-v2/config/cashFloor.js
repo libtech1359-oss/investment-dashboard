@@ -47,6 +47,24 @@ const CRASH_NASDAQ_DROP_PCT = num(process.env.CASH_FLOOR_CRASH_NASDAQ_DROP_PCT, 
 // これ未満に縮小されたら 0（＝買付見送り）に丸める。orderManager の下限（¥1,000）と揃える。
 const MIN_ORDER_AMOUNT      = num(process.env.CASH_FLOOR_MIN_ORDER_AMOUNT, 1000);
 
+// ── 小口買付（2026-11-06 確定仕様）────────────────────────────
+// 現金比率が下限〜SOFT(20%)の間では、現金フロア適用後の最終金額に小口キャップをかける。
+// 目的は「現金が少ない間も、合理的な機会に限って少額で買い続けられる」ようにすること。
+// 取引回数を増やすこと自体は目的にしない（買付ゲートは従来の実効スコア0.5以上のまま）。
+const SMALL_LOT_NORMAL_AMOUNT     = num(process.env.SMALL_LOT_NORMAL_AMOUNT, 10000);    // 通常の小口上限
+const SMALL_LOT_STRONG_AMOUNT     = num(process.env.SMALL_LOT_STRONG_AMOUNT, 30000);    // 強根拠のときの小口上限
+const SMALL_LOT_CRASH_BAND_AMOUNT = num(process.env.SMALL_LOT_CRASH_BAND_AMOUNT, 10000); // 暴落時の下限帯(5〜10%)は固定
+// ポートフォリオ管理部（アオイ）の買い票を有効にする条件（現金比率が下限〜SOFTの間のみ）
+const SMALL_LOT_AOI_MAX_FEAR_GREED  = num(process.env.SMALL_LOT_AOI_MAX_FEAR_GREED, 30);  // Fear&Greed これ以下
+const SMALL_LOT_AOI_MIN_OTHER_BUYS  = num(process.env.SMALL_LOT_AOI_MIN_OTHER_BUYS, 2);   // 他3部署の買い票 これ以上
+// 強根拠の条件（両方満たすとき）。Rule Engineスコアは candidate_assets.score の 0〜100 スケールで、
+// 既存の TIEBREAK_MIN_RULE_SCORE(0.70) とは別物（スケール不整合は別件。流用しない）。
+const SMALL_LOT_STRONG_MIN_VOTE_SCORE = num(process.env.SMALL_LOT_STRONG_MIN_VOTE_SCORE, 0.75); // 実効の部署スコア
+const SMALL_LOT_STRONG_MIN_RULE_SCORE = num(process.env.SMALL_LOT_STRONG_MIN_RULE_SCORE, 20);   // 採用銘柄の Rule Engine スコア(0-100)
+
+const PORTFOLIO_DEPT = 'ポートフォリオ管理部';
+const BUY_SIGNALS    = new Set(['BUY', 'ACCUMULATE']);
+
 /**
  * 暴落シグナル判定（純粋関数）。
  * @param {{fearGreed?:number|string, nasdaqChangePct?:number|string}} mkt
@@ -115,7 +133,132 @@ function resolveBuyBudget({ cashRatioPct, cashJpy = Infinity, baseAmount, crashS
   };
 }
 
+/**
+ * ポートフォリオ管理部（アオイ）の実効票を決める（純粋関数・小口買付）。
+ *
+ * アオイは他部署の票を見られない（マーケット/リスクと並列に投票し、審査部は後続）ため、
+ * 「他3部署の買い票が○票以上」という条件は全票が揃った集計側（signalAggregator）で判定する。
+ * アオイの買い票（BUY/ACCUMULATE）だけが対象で、WAIT等はそのまま返す。
+ *
+ *   cashRatioPct 数値化不可 / SOFT(20%)以上      -> そのまま（従来ルール）
+ *   cashRatioPct <= 下限（通常10% / 暴落5%）     -> WAIT（原則WAIT。現金フロアでも買付ゼロ）
+ *   下限 < cashRatioPct < SOFT                    -> Fear&Greed <= 30 かつ 他3部署の買い票 >= 2 のときだけ有効。
+ *                                                    満たさなければ WAIT 扱い（票の置換のみ。元データは変更しない）
+ *
+ * @param {object} args
+ * @param {string}        args.signal         アオイの投票シグナル
+ * @param {number|string} args.cashRatioPct   現在の現金比率（%）
+ * @param {number|string} args.fearGreed      Fear & Greed
+ * @param {boolean}       [args.crashSignal]  暴落シグナル（isCrashSignal() の結果）
+ * @param {number}        [args.otherBuyVotes] マーケット/リスク/審査のうち BUY|ACCUMULATE の部署数
+ * @returns {{signal:string, downgraded:boolean, note:string}}
+ */
+function resolvePortfolioVote({ signal, cashRatioPct, fearGreed, crashSignal = false, otherBuyVotes = 0, cfg = module.exports }) {
+  const sig = String(signal || '').toUpperCase();
+  if (!BUY_SIGNALS.has(sig)) return { signal: sig, downgraded: false, note: '' };
+
+  const cr = pf(cashRatioPct);
+  if (!Number.isFinite(cr) || cr >= cfg.CASH_FLOOR_SOFT_PCT) {
+    return { signal: sig, downgraded: false, note: '' };
+  }
+
+  const floorPct = crashSignal ? cfg.CASH_FLOOR_CRASH_PCT : cfg.CASH_FLOOR_HARD_PCT;
+  if (cr <= floorPct) {
+    return {
+      signal: 'WAIT', downgraded: true,
+      note: `現金比率${cr}%が下限${floorPct}%以下のため、ポートフォリオ管理部の買い票は見送り扱いとしました。`,
+    };
+  }
+
+  const fg = pf(fearGreed);
+  const fgOk    = Number.isFinite(fg) && fg <= cfg.SMALL_LOT_AOI_MAX_FEAR_GREED;
+  const votesOk = otherBuyVotes >= cfg.SMALL_LOT_AOI_MIN_OTHER_BUYS;
+  if (fgOk && votesOk) return { signal: sig, downgraded: false, note: '' };
+
+  return {
+    signal: 'WAIT', downgraded: true,
+    note: `現金比率${cr}%の小口買付条件（Fear & Greed ${cfg.SMALL_LOT_AOI_MAX_FEAR_GREED}以下、かつ他の3部署のうち${cfg.SMALL_LOT_AOI_MIN_OTHER_BUYS}部署以上が買い支持）を満たさなかったため、ポートフォリオ管理部の買い票は見送り扱いとしました。`,
+  };
+}
+
+/**
+ * 小口キャップ（純粋関数）。現金フロア適用「後」の最終金額に対して上限をかける。
+ *
+ *   cashRatioPct 数値化不可 / SOFT以上  -> 素通し（キャップなし）
+ *   cashRatioPct <= 下限                 -> 0（現金フロアと同じ最終下限。防御的）
+ *   暴落シグナル かつ 現金比率 <= HARD(10%) -> 上限 ¥10,000 固定（強根拠は適用しない）
+ *   強根拠（実効スコア>=0.75 かつ 採用銘柄の Rule Engine スコア>=20） -> 上限 ¥30,000
+ *   それ以外                              -> 上限 ¥10,000
+ *   最終額 = floorTo1000(min(フロア後の額, 上限, 現金残高))。MIN_ORDER_AMOUNT(¥1,000)未満は 0。
+ *   ※ 部署の推薦額の平均がいくら大きくても、上限を超えない。
+ *
+ * @param {object} args
+ * @param {number|string} args.cashRatioPct
+ * @param {number|string} [args.cashJpy]
+ * @param {number|string} args.amount        現金フロア適用後の金額（円）
+ * @param {boolean}       [args.crashSignal]
+ * @param {number|string} [args.voteScore]   実効の部署スコア（アオイの実効票を反映した normalizedScore）
+ * @param {number|string} [args.ruleScore]   採用銘柄自身の candidate_assets.score（0〜100）
+ * @returns {{amount:number, applied:boolean, strong:boolean, cap:number|null, note:string}}
+ *   applied=true は「金額を変更した（または見送りにした）」ことを表す。
+ */
+function resolveSmallLotAmount({ cashRatioPct, cashJpy = Infinity, amount, crashSignal = false, voteScore, ruleScore, cfg = module.exports }) {
+  const base = Math.max(0, num(amount, 0));
+  const cr   = pf(cashRatioPct);
+  if (!Number.isFinite(cr) || cr >= cfg.CASH_FLOOR_SOFT_PCT) {
+    return { amount: base, applied: false, strong: false, cap: null, note: '' };
+  }
+
+  const floorPct = crashSignal ? cfg.CASH_FLOOR_CRASH_PCT : cfg.CASH_FLOOR_HARD_PCT;
+  if (cr <= floorPct) {
+    return {
+      amount: 0, applied: true, strong: false, cap: 0,
+      note: `現金比率${cr}%が下限${floorPct}%以下のため、買付を見送りました。`,
+    };
+  }
+
+  const crashBand = crashSignal && cr <= cfg.CASH_FLOOR_HARD_PCT;
+  const vs = pf(voteScore);
+  const rs = pf(ruleScore);
+  const strong = !crashBand
+    && Number.isFinite(vs) && vs >= cfg.SMALL_LOT_STRONG_MIN_VOTE_SCORE
+    && Number.isFinite(rs) && rs >= cfg.SMALL_LOT_STRONG_MIN_RULE_SCORE;
+  const cap = crashBand ? cfg.SMALL_LOT_CRASH_BAND_AMOUNT
+            : strong    ? cfg.SMALL_LOT_STRONG_AMOUNT
+            :             cfg.SMALL_LOT_NORMAL_AMOUNT;
+
+  const parsedCash = pf(cashJpy);
+  const cashCap = Number.isFinite(parsedCash) ? Math.max(0, parsedCash) : Infinity;
+  const amt = Math.floor(Math.min(base, cap, cashCap) / 1000) * 1000;
+
+  if (amt < cfg.MIN_ORDER_AMOUNT) {
+    return {
+      amount: 0, applied: true, strong, cap,
+      note: `現金比率${cr}%のため小口買付に絞った結果、買付額が最小発注額未満となり見送りました。`,
+    };
+  }
+  if (amt === base) {
+    return { amount: amt, applied: false, strong, cap, note: '' };
+  }
+  return {
+    amount: amt, applied: true, strong, cap,
+    note: `現金比率${cr}%と資金余力が限られているため、小口買付として買付を¥${amt.toLocaleString()}に抑制しました` +
+          (strong ? `（根拠が強いため上限¥${cap.toLocaleString()}）。` : '。'),
+  };
+}
+
 module.exports = {
+  SMALL_LOT_NORMAL_AMOUNT,
+  SMALL_LOT_STRONG_AMOUNT,
+  SMALL_LOT_CRASH_BAND_AMOUNT,
+  SMALL_LOT_AOI_MAX_FEAR_GREED,
+  SMALL_LOT_AOI_MIN_OTHER_BUYS,
+  SMALL_LOT_STRONG_MIN_VOTE_SCORE,
+  SMALL_LOT_STRONG_MIN_RULE_SCORE,
+  PORTFOLIO_DEPT,
+  BUY_SIGNALS,
+  resolvePortfolioVote,
+  resolveSmallLotAmount,
   CASH_FLOOR_SOFT_PCT,
   CASH_FLOOR_HARD_PCT,
   CASH_FLOOR_CRASH_PCT,

@@ -1,6 +1,6 @@
 {
-  "version": "2.6.0",
-  "updated_at": "2026-08-01 13:40:23",
+  "version": "2.19.0",
+  "updated_at": "2026-11-06 22:33:23",
   "history": [
     {
       "version": "2.1.0",
@@ -31,6 +31,71 @@
       "version": "2.6.0",
       "date": "2026-08-01 13:40:23",
       "reason": "feat(decision): add Observation Candidate Filter for long-term asset preference"
+    },
+    {
+      "version": "2.7.0",
+      "date": "2026-08-05 13:37:30",
+      "reason": "fix(article): 記事のストーリー性・整合性を改善(候補3カテゴリ欠落/結論先出し/審査部論理/最終判断構成/秘書室長テンプレ化)"
+    },
+    {
+      "version": "2.8.0",
+      "date": "2026-08-08 17:30:59",
+      "reason": "feat(article): v2.7 記事生成品質改善（Rule Engine透明性・候補整合・週次評価の過程化）"
+    },
+    {
+      "version": "2.9.0",
+      "date": "2026-08-09 23:14:01",
+      "reason": "phase3: apply article autonomous validation and fail logging"
+    },
+    {
+      "version": "2.10.0",
+      "date": "2026-08-13 14:19:44",
+      "reason": "fix(article): 部署判断→記事→最終判断の整合性トレーサビリティを修復"
+    },
+    {
+      "version": "2.11.0",
+      "date": "2026-08-14 15:33:43",
+      "reason": "fix(ai-capital-v2): 記事生成パイプラインのstale heartbeat/DNS障害/Rule28重複/グラフ埋め込み検証を修正"
+    },
+    {
+      "version": "2.12.0",
+      "date": "2026-08-25 15:15:09",
+      "reason": "@ fix(ai-capital-v2): 日刊記事が数日連続で公開に至らなかった5件の不具合を修正"
+    },
+    {
+      "version": "2.13.0",
+      "date": "2026-08-25 15:15:45",
+      "reason": "fix(ai-capital-v2): 日刊記事が数日連続で公開に至らなかった5件の不具合を修正"
+    },
+    {
+      "version": "2.14.0",
+      "date": "2026-09-07 13:42:53",
+      "reason": "feat(ai-capital-v2): 買い側キャッシュフロアを導入（暴落逆張り用の資金余力を残す）"
+    },
+    {
+      "version": "2.15.0",
+      "date": "2026-09-07 16:17:38",
+      "reason": "feat(ai-capital-v2): 財務戦略部（財前ミナ）を日刊記事に登場させる"
+    },
+    {
+      "version": "2.16.0",
+      "date": "2026-09-08 15:35:33",
+      "reason": "fix(ai-capital-v2): 財前ミナ記事デビュー初回(2026-09-08)の公開ブロック4件を修正"
+    },
+    {
+      "version": "2.17.0",
+      "date": "2026-11-05 13:19:54",
+      "reason": "fix(ai-capital-v2): 自由文判定ルールの誤検出を共通ヘルパーで抑制（Rule 11/12/20/22/24/25/39/43）"
+    },
+    {
+      "version": "2.18.0",
+      "date": "2026-11-06 15:28:04",
+      "reason": "feat(ai-capital-v2): 日刊末尾に特別号アーカイブ案内を追加＋Rule 43/28の誤検出・重複を修正"
+    },
+    {
+      "version": "2.19.0",
+      "date": "2026-11-06 22:33:23",
+      "reason": "feat(ai-capital-v2): 現金比率10〜20%帯の小口買付を導入（通常¥10,000／強根拠¥30,000・アオイの買い票に条件付き許可・現金フロア後に小口キャップ）"
     }
   ]
 }
