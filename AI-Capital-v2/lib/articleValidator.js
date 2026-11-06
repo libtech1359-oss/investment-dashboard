@@ -1160,10 +1160,15 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
     // 個別銘柄の過熱感（例「FANG+は短期的な過熱感が」）は正当な記述のため、市場全体を指す語を
     // 含む文だけを対象にする（2026-10-30: 銘柄単位の記述を誤検出し、6回再生成しても解消せず公開停止した）。
     const MARKET_WIDE_RE = /(市場|相場|指標|心理|地合い|センチメント|投資家)/;
+    // 「過熱感による調整局面」「過熱が冷めて反落」のように、過熱は"下落の原因・過去の経緯"として
+    // 語られているだけの文は、現在が強欲圏だと主張していないため矛盾とみなさない
+    // （2026-11-06: 「直近高値から約21%下落し、市場の過熱感による調整局面を…」を誤検出し、
+    //   LLM再生成6回でも解消せず公開停止した）。
+    const OVERHEAT_UNWIND_RE = /過熱(感|気味|圏|状態)?[^。、]{0,8}(調整|反落|反動|巻き戻し|修正|冷め|下落|剥落)/;
     const fearFlagged = [], greedFlagged = [];
     if (fg != null) {
       for (const s of sentencesOf(proseBody).filter(x => MARKET_WIDE_RE.test(x))) {
-        if (fg <= 45 && /(過熱(感|気味|し(て|ま)|圏|状態)|強欲(圏|ムード|水準)|楽観(ムード|的な空気|が広が))/.test(s)) fearFlagged.push(s);
+        if (fg <= 45 && /(過熱(感|気味|し(て|ま)|圏|状態)|強欲(圏|ムード|水準)|楽観(ムード|的な空気|が広が))/.test(s) && !OVERHEAT_UNWIND_RE.test(s)) fearFlagged.push(s);
         if (fg >= 56 && /(パニック(売り|的)|悲観(一色|ムード|が広が)|恐怖(が|に)(広が|支配))/.test(s)) greedFlagged.push(s);
       }
     }

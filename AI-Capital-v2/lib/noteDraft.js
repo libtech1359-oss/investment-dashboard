@@ -281,6 +281,45 @@ async function insertViaHtml(page, text) {
 }
 
 /**
+ * URLだけの段落をnoteのリンクカード（external-article埋め込み）に変換する。
+ * innerHTML一括注入ではURLがただのテキストのままになるため、エディタ上でURLを
+ * 打ち直してEnterを押し、note標準の自動カード化を発火させる。
+ * 失敗しても記事本体は壊れない（URLテキストのまま残る）ので例外は握りつぶして false を返す。
+ */
+async function embedLinkCards(page, urlPrefix = 'https://note.com/') {
+  let done = 0;
+  try {
+    const urls = await page.evaluate((prefix) =>
+      [...document.querySelectorAll('.ProseMirror > p')]
+        .map(p => p.textContent.trim())
+        .filter(t => t.startsWith(prefix) && !/\s/.test(t)),
+      urlPrefix);
+    for (const url of urls) {
+      const para = page.locator('.ProseMirror > p', { hasText: url }).first();
+      if (!(await para.count())) continue;
+      await para.scrollIntoViewIfNeeded();
+      await para.click();
+      // 段落末尾→Shift+Homeで段落全体を選択（Backspace/Deleteは段落結合を起こすので使わない）し、
+      // 選択範囲に上書きでURLをタイプ→Enterでnote標準のカード化を発火させる（実機検証済み。
+      // pasteイベント方式は選択が無視されて不安定だった）。
+      await page.keyboard.press('End');
+      await page.keyboard.press('Shift+Home');
+      await page.waitForTimeout(300);
+      await page.keyboard.type(url, { delay: 5 });
+      await page.waitForTimeout(1500);
+      await page.keyboard.press('Enter');
+      const ok = await page.locator(`.ProseMirror figure[data-src="${url}"]`)
+        .first().waitFor({ state: 'attached', timeout: 15000 }).then(() => true).catch(() => false);
+      log(ok ? `リンクカード化: ${url}` : `リンクカード化失敗（URLテキストのまま）: ${url}`);
+      if (ok) done++;
+    }
+  } catch (e) {
+    log(`リンクカード化エラー（無視して続行）: ${e.message}`);
+  }
+  return done;
+}
+
+/**
  * 「公開に進む」パネルへ遷移し、タグを入力して「投稿する」まで自動で行う。
  * note.com側のUI変更・reCAPTCHA等で失敗した場合は例外を投げる（呼び出し元が
  * 下書き保存へフォールバックする前提）。2026-08-24にヘッドレスで動作確認済みの
@@ -419,6 +458,7 @@ async function saveDraft({ title, body, thumbPath, historyChartPath, chartPath, 
       .replace(/\n*(▼[A-Z]+▼)\n*/g, '\n\n$1\n\n')
       .replace(/\n{3,}/g, '\n\n');
     await insertViaHtml(page, processedBody);
+    await embedLinkCards(page);
 
     // 段落数デバッグ
     const pCount = await page.evaluate(() =>

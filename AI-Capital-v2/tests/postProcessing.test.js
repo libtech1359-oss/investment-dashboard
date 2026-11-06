@@ -103,3 +103,18 @@ test('applyPostProcessing: ▼HISTORY▼/▼CHART▼マーカーは常に1回だ
     }
   }
 });
+
+test('applyPostProcessing: 見出しなしで複製された4項目（投資家心理〜為替）も除去され、指標行は1回だけになる（2026-11-06 Rule28再発防止）', () => {
+  const headerless = [
+    '😨 投資家心理', 'Fear & Greed：47（中立）', '',
+    '📉 市場環境', '堅調', '',
+    '⚠️ リスク', 'VIX：15.84（普通）', '',
+    '💵 為替', 'USD/JPY：161.42（円安）', '', '',
+  ].join('\n');
+  // LLMが📋番号行の直後に、見出しなしでブロック本体だけ写してしまった状態を再現
+  const raw = RAW_NOTE.replace('# 📊 AI Capital市場会議\n', `# 📊 AI Capital市場会議\n\n📋 AC-2026-9999\n\n${headerless}`);
+  const fixed = applyPostProcessing(raw, baseCtx());
+  assert.equal((fixed.match(/Fear & Greed：/g) || []).length, 1, 'Fear & Greed行は1回だけのはず');
+  assert.equal((fixed.match(/USD\/JPY：/g) || []).length, 1, 'USD/JPY行は1回だけのはず');
+  assert.equal((fixed.match(/📊 AI Capital Market Check/g) || []).length, 1);
+});
