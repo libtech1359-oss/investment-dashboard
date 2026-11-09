@@ -247,7 +247,22 @@ function resolveSmallLotAmount({ cashRatioPct, cashJpy = Infinity, amount, crash
   };
 }
 
+/**
+ * 部署プロンプト用の金額ガイド行（現金比率が小口帯のときだけ返す。それ以外は空文字）。
+ * 部署の推薦額が後段の現金フロア/小口キャップと大きく食い違わないようにするための参考情報で、
+ * シグナル（買う/買わない）の判断基準には一切影響させない。
+ */
+function smallLotAmountHint(cashRatioPct, cfg = module.exports) {
+  const cr = Number(cashRatioPct);
+  if (cashRatioPct === '' || cashRatioPct == null || !Number.isFinite(cr)) return '';
+  if (cr >= cfg.CASH_FLOOR_SOFT_PCT || cr <= cfg.CASH_FLOOR_HARD_PCT) return '';
+  return `【資金面の参考（金額欄のみに反映）】現金比率${cr}%（${cfg.CASH_FLOOR_HARD_PCT}%以上${cfg.CASH_FLOOR_SOFT_PCT}%未満の小口帯）。` +
+    `買い判断のときの recommended_amount は小口の¥${cfg.SMALL_LOT_NORMAL_AMOUNT.toLocaleString()}を基本とし、` +
+    `通常レンジ（数十万円）は使わないこと。signal（買う/買わない）の判断基準はこの情報で変えない。`;
+}
+
 module.exports = {
+  smallLotAmountHint,
   SMALL_LOT_NORMAL_AMOUNT,
   SMALL_LOT_STRONG_AMOUNT,
   SMALL_LOT_CRASH_BAND_AMOUNT,

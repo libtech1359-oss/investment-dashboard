@@ -198,3 +198,20 @@ test('SL-C 設定値が確定仕様どおり', () => {
   assert.equal(cf.CASH_FLOOR_HARD_PCT, 10);
   assert.equal(cf.CASH_FLOOR_CRASH_PCT, 5);
 });
+
+// ── 部署プロンプト用の金額ガイド（smallLotAmountHint）──────────
+test('SL-H1 小口帯（10超〜20未満）ではガイド行を返し、小口額と「signal判断は変えない」を含む', () => {
+  const h = cf.smallLotAmountHint(16);
+  assert.match(h, /現金比率16%/);
+  assert.match(h, /¥10,000/);
+  assert.match(h, /signal.*変えない/);
+});
+
+test('SL-H2 帯の外（20%以上・10%以下）・数値化不能では空文字（プロンプト不変）', () => {
+  assert.equal(cf.smallLotAmountHint(20), '');
+  assert.equal(cf.smallLotAmountHint(45), '');
+  assert.equal(cf.smallLotAmountHint(10), '');
+  assert.equal(cf.smallLotAmountHint(''), '');
+  assert.equal(cf.smallLotAmountHint(undefined), '');
+  assert.equal(cf.smallLotAmountHint('abc'), '');
+});

@@ -96,12 +96,17 @@ async function getTodayDisplayCandidates(date) {
 }
 
 async function buildContext(date, displayCandidates) {
-  const [mkt, votes] = await Promise.all([
+  const [mkt, votes, pf] = await Promise.all([
     sheets.getLatestRow('market_data').catch(() => null),
     sheets.getRowsByDate('agent_votes', date).catch(() => []),
+    sheets.getLatestRow('portfolio_status').catch(() => null),
   ]);
 
   const lines = [];
+
+  // 金額欄のみ: 現金比率が小口帯のときは推薦額を小口に合わせる（signal判断には使わない）
+  const hint = require('../config/cashFloor').smallLotAmountHint(pf?.cash_ratio);
+  if (hint) { lines.push(hint); lines.push(''); }
 
   if (displayCandidates.length > 0) {
     lines.push('【本日の買付候補（言及する場合はこの3件の中からのみ。ここに無い銘柄への言及は禁止）】');

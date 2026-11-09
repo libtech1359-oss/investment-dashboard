@@ -124,6 +124,11 @@ async function buildContext(date, displayCandidates) {
     lines.push('【本日の買付候補】データ未取得（asset_masterを確認すること）');
   }
 
+  // 金額欄のみ: 現金比率が小口帯のときは推薦額を小口に合わせる（signal判断には使わない）
+  const pf = await sheets.getLatestRow('portfolio_status').catch(() => null);
+  const hint = require('../config/cashFloor').smallLotAmountHint(pf?.cash_ratio);
+  if (hint) { lines.push(''); lines.push(hint); }
+
   return lines.join('\n');
 }
 
