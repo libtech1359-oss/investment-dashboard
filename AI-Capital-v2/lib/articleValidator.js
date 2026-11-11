@@ -1148,9 +1148,13 @@ function validateArticle({ note, pf, candidates, decisions, recs, articleNum, da
 
     const NEGATION_RE   = /(ない|ません|見られず|乏しい|とは言えず|とは言えない|いません|ではなく|でなく|ではあり|というより)/;
     const CONDITIONAL_RE = /(→|以上|以下|超え|なら|場合|入り|まで)/;
+    // 「神谷の買い推奨は過熱感という根拠が不足している」のように他者の主張の弱さを批判する文は、
+    // 過熱を主張する文ではない（2026-11-11 実インシデント）。
+    const CRITIQUE_RE = /(不足|欠け|欠く|欠如|説得力|裏付け)/;
     const sentencesOf = text => text.split(/\n/).flatMap(l => l.split(/(?<=。)/))
       .map(s => s.trim()).filter(Boolean)
-      .filter(s => !NEGATION_RE.test(s) && !CONDITIONAL_RE.test(s));
+      .filter(s => !NEGATION_RE.test(s) && !CONDITIONAL_RE.test(s) &&
+        !SKIP_NEG.test(s) && !SKIP_Q.test(s) && !SKIP_VIEW.test(s) && !CRITIQUE_RE.test(s));
 
     // 👀 次回の注目点以降（免責含む）と Market Check ブロックは対象外
     const watchIdx = note.search(/\n👀/);
